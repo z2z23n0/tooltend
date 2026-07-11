@@ -1,0 +1,2 @@
+ALTER TABLE bindings ADD COLUMN config_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE bindings ADD COLUMN config_pointer TEXT NOT NULL DEFAULT '';

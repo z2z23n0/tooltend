@@ -1,2 +1,11 @@
 .ml-cache/
 .mainline/local.toml
+
+# Go build and test artifacts
+/bin/
+/dist/
+/coverage.out
+*.test
+
+# ToolTend local runtime state
+/.tooltend/
