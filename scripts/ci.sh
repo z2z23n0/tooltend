@@ -14,7 +14,11 @@ if [[ -n "$unformatted" ]]; then
   exit 1
 fi
 
-"$GO_BIN" mod tidy -diff
+"$GO_BIN" mod tidy
+if ! git diff --exit-code -- go.mod go.sum; then
+  echo "go.mod or go.sum is not tidy; run 'go mod tidy' and commit the result" >&2
+  exit 1
+fi
 "$GO_BIN" vet ./...
 "$GO_BIN" test ./...
 "$GO_BIN" build ./...
