@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/z2z23n0/tooltend/internal/config"
@@ -71,6 +72,53 @@ func TestFullRepairPlanIsReadOnlyUntilConfirmedAndRepairsAllIntegrations(t *test
 		if operation.ID == "repair-scheduler" {
 			t.Fatalf("healthy scheduler was rewritten by a second repair: %#v", operation)
 		}
+	}
+}
+
+func TestSchedulerFileContentMatchesFileRole(t *testing.T) {
+	executable := "/opt/tooltend/bin/tooltend"
+	stateDir := "/var/lib/tooltend-state"
+	service := `[Unit]
+Description=ToolTend one-shot reconciliation
+
+[Service]
+Type=oneshot
+ExecStart="/opt/tooltend/bin/tooltend" reconcile --once --state-dir "/var/lib/tooltend-state" --json
+`
+	timer := `[Unit]
+Description=Run ToolTend reconciliation daily
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`
+	tests := []struct {
+		name     string
+		file     string
+		content  string
+		exe      string
+		stateDir string
+		want     bool
+	}{
+		{name: "service", file: "tooltend-reconcile.service", content: service, exe: executable, stateDir: stateDir, want: true},
+		{name: "timer", file: "tooltend-reconcile.timer", content: timer, exe: executable, stateDir: stateDir, want: true},
+		{name: "timer missing calendar", file: "tooltend-reconcile.timer", content: strings.Replace(timer, "OnCalendar=", "Calendar=", 1), exe: executable, stateDir: stateDir},
+		{name: "timer missing persistence", file: "tooltend-reconcile.timer", content: strings.Replace(timer, "Persistent=true", "Persistent=false", 1), exe: executable, stateDir: stateDir},
+		{name: "service missing once", file: "tooltend-reconcile.service", content: strings.Replace(service, "--once", "--continuous", 1), exe: executable, stateDir: stateDir},
+		{name: "service wrong executable", file: "tooltend-reconcile.service", content: service, exe: "/opt/tooltend/bin/other", stateDir: stateDir},
+		{name: "service wrong state", file: "tooltend-reconcile.service", content: service, exe: executable, stateDir: "/var/lib/other-state"},
+		{name: "unknown file", file: "schedule.txt", content: service, exe: executable, stateDir: stateDir},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := schedulerFileContentMatches(test.file, test.content, test.exe, test.stateDir); got != test.want {
+				t.Fatalf("schedulerFileContentMatches()=%v want=%v", got, test.want)
+			}
+		})
 	}
 }
 

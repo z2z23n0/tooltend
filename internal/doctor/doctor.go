@@ -241,12 +241,30 @@ func schedulerFilesMatch(paths config.Paths, home, executable string) bool {
 			return false
 		}
 		content, err := os.ReadFile(path)
-		if err != nil || !strings.Contains(string(content), "reconcile") || !strings.Contains(string(content), "--once") ||
-			!strings.Contains(string(content), filepath.Base(executable)) || !strings.Contains(string(content), filepath.Base(paths.StateDir)) {
+		if err != nil || !schedulerFileContentMatches(filepath.Base(path), string(content), executable, paths.StateDir) {
 			return false
 		}
 	}
 	return true
+}
+
+func schedulerFileContentMatches(name, content, executable, stateDir string) bool {
+	containsAll := func(values ...string) bool {
+		for _, value := range values {
+			if !strings.Contains(content, value) {
+				return false
+			}
+		}
+		return true
+	}
+	switch name {
+	case "io.tooltend.reconcile.plist", "tooltend-reconcile.service":
+		return containsAll("reconcile", "--once", "--state-dir", filepath.Base(executable), filepath.Base(stateDir))
+	case "tooltend-reconcile.timer":
+		return containsAll("[Timer]", "OnCalendar=*-*-* ", "RandomizedDelaySec=1h", "Persistent=true", "[Install]", "WantedBy=timers.target")
+	default:
+		return false
+	}
 }
 
 func schedulerPaths(paths config.Paths, home string) []string {
