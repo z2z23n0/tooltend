@@ -43,6 +43,74 @@ func TestCommandTreeContainsCompleteV1Surface(t *testing.T) {
 	}
 }
 
+func TestComponentsListSeparatesActionableManagedAndCompleteInventory(t *testing.T) {
+	var seedOut, seedErr bytes.Buffer
+	options := testOptions(t, &seedOut, &seedErr, strings.NewReader(""))
+	paths := config.ResolveWith(options.HomeDir, options.Getenv)
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.OpenRW(paths.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	components := []model.LogicalComponent{
+		{ID: "actionable", Kind: model.ComponentSkill, Name: "actionable", LogicalKey: "actionable", CreatedAt: now, UpdatedAt: now},
+		{ID: "managed", Kind: model.ComponentSkill, Name: "managed", LogicalKey: "managed", CreatedAt: now, UpdatedAt: now},
+		{ID: "host-owned", Kind: model.ComponentSkill, Name: "host-owned", LogicalKey: "host-owned", CreatedAt: now, UpdatedAt: now},
+		{ID: "dependency-only", Kind: model.ComponentCLI, Name: "dependency-only", LogicalKey: "dependency-only", CreatedAt: now, UpdatedAt: now},
+	}
+	for _, component := range components {
+		if err := database.UpsertComponent(context.Background(), component); err != nil {
+			database.Close()
+			t.Fatal(err)
+		}
+	}
+	bindings := []model.Binding{
+		{ID: "binding-actionable", ComponentID: "actionable", Host: model.HostCodex, Scope: model.ScopeGlobal, InstallPath: "/skills/actionable", InstallMethod: "observed", Classification: model.ClassificationDetached, LastSeenAt: now},
+		{ID: "binding-managed", ComponentID: "managed", Host: model.HostCodex, Scope: model.ScopeGlobal, InstallPath: "/skills/managed", InstallMethod: "generation_symlink", Managed: true, Classification: model.ClassificationClean, LastSeenAt: now},
+		{ID: "binding-host-owned", ComponentID: "host-owned", Host: model.HostCodex, Scope: model.ScopeGlobal, InstallPath: "/cache/plugin/skill", InstallMethod: "host-owned:codex", Classification: model.ClassificationClean, LastSeenAt: now},
+	}
+	for _, binding := range bindings {
+		if err := database.UpsertBinding(context.Background(), binding); err != nil {
+			database.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) []componentSummary {
+		t.Helper()
+		var out, stderr bytes.Buffer
+		runOptions := options
+		runOptions.In, runOptions.Out, runOptions.ErrOut = strings.NewReader(""), &out, &stderr
+		command := New(runOptions)
+		command.SetArgs(append([]string{"components", "list", "--json"}, args...))
+		if err := command.Execute(); err != nil {
+			t.Fatalf("components list %v: %v\nstderr=%s", args, err, stderr.String())
+		}
+		var envelope struct {
+			Data []componentSummary `json:"data"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return envelope.Data
+	}
+	if got := run(); len(got) != 2 || got[0].Component.Name != "actionable" || got[1].Component.Name != "managed" {
+		t.Fatalf("default components = %#v", got)
+	}
+	if got := run("--managed"); len(got) != 1 || got[0].Component.Name != "managed" {
+		t.Fatalf("managed components = %#v", got)
+	}
+	if got := run("--all"); len(got) != 4 {
+		t.Fatalf("all components = %#v", got)
+	}
+}
+
 type successfulRunner struct{ calls int }
 
 func (r *successfulRunner) Run(context.Context, string, ...string) (execx.Result, error) {

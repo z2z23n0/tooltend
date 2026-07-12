@@ -51,7 +51,9 @@ func (h *CodexHost) Scan(ctx context.Context, options ScanOptions) (Result, erro
 		}
 	}
 
+	cacheStart := len(c.result.Observations)
 	scanPluginCache(ctx, c, filepath.Join(codexDir, "plugins", "cache"))
+	markLifecycleOwner(c.result.Observations[cacheStart:], Codex)
 	scanMarketplaceFile(ctx, c, filepath.Join(options.HomeDir, ".agents", "plugins", "marketplace.json"), ScopeUser, "", false)
 	for _, project := range options.Projects {
 		root := discoverRepoRoot(project)
@@ -111,7 +113,7 @@ func (*CodexHost) scanConfiguredPlugins(c *collector, document map[string]any, e
 		}
 		name, marketplace, _ := strings.Cut(id, "@")
 		source := SourceRef{Kind: "plugin_config", Locator: id}
-		metadata := map[string]string{}
+		metadata := map[string]string{MetadataLifecycleOwner: string(Codex)}
 		if marketplace != "" {
 			metadata["marketplace"] = marketplace
 		}
@@ -121,6 +123,15 @@ func (*CodexHost) scanConfiguredPlugins(c *collector, document map[string]any, e
 			Enabled: enabled, Source: source, Metadata: metadata,
 			Evidence: []Evidence{{Path: evidence.Path, Format: evidence.Format, Layer: evidence.Layer, Pointer: pointer}},
 		}, evidence.Path)
+	}
+}
+
+func markLifecycleOwner(observations []Observation, owner Name) {
+	for index := range observations {
+		if observations[index].Metadata == nil {
+			observations[index].Metadata = map[string]string{}
+		}
+		observations[index].Metadata[MetadataLifecycleOwner] = string(owner)
 	}
 }
 

@@ -125,6 +125,10 @@ func (a *App) newPolicyCommand() *cobra.Command {
 				if bindingID != "" && binding.ID != bindingID {
 					continue
 				}
+				if binding.HostOwned() && mode != "" && model.ApplyMode(mode) != model.ApplyIgnore {
+					database.Close()
+					return nil, cliError("observe_only", fmt.Sprintf("binding lifecycle is owned by %s", binding.LifecycleOwner()), nil)
+				}
 				policy, getErr := database.GetPolicy(ctx, binding.ID)
 				if getErr != nil {
 					database.Close()

@@ -30,11 +30,12 @@ type statusData struct {
 }
 
 type componentSummary struct {
-	Component model.LogicalComponent `json:"component"`
-	Source    model.Source           `json:"source"`
-	Bindings  int                    `json:"bindings"`
-	Managed   int                    `json:"managed_bindings"`
-	Status    string                 `json:"status"`
+	Component         model.LogicalComponent `json:"component"`
+	Source            model.Source           `json:"source"`
+	Bindings          int                    `json:"bindings"`
+	Managed           int                    `json:"managed_bindings"`
+	HostOwnedBindings int                    `json:"host_owned_bindings,omitempty"`
+	Status            string                 `json:"status"`
 }
 
 type bindingDetail struct {
@@ -102,16 +103,31 @@ func (a *App) newStatusCommand() *cobra.Command {
 				result.ManagedBindings++
 			}
 		}
-		for status, destination := range map[model.CandidateStatus]*int{
-			model.CandidateAvailable:   &result.UpdatesAvailable,
-			model.CandidateNeedsReview: &result.NeedsReview,
-			model.CandidateFailed:      &result.FailedCandidates,
-		} {
-			items, listErr := database.ListCandidates(ctx, "", status)
+		for _, binding := range bindings {
+			if binding.HostOwned() {
+				continue
+			}
+			policy, policyErr := database.GetPolicy(ctx, binding.ID)
+			if policyErr != nil {
+				return nil, policyErr
+			}
+			if policy.ApplyMode == model.ApplyIgnore || policy.LocalCapMode == model.ApplyIgnore {
+				continue
+			}
+			candidates, listErr := database.ListCandidates(ctx, binding.ID, "")
 			if listErr != nil {
 				return nil, listErr
 			}
-			*destination = len(items)
+			for _, candidate := range candidates {
+				switch candidate.Status {
+				case model.CandidateAvailable:
+					result.UpdatesAvailable++
+				case model.CandidateNeedsReview:
+					result.NeedsReview++
+				case model.CandidateFailed:
+					result.FailedCandidates++
+				}
+			}
 		}
 		tasks, err := database.CountTasks(ctx)
 		if err != nil {
@@ -140,8 +156,14 @@ func (a *App) newStatusCommand() *cobra.Command {
 
 func (a *App) newComponentsCommand() *cobra.Command {
 	command := &cobra.Command{Use: "components", Short: "Inspect discovered components", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
-	list := &cobra.Command{Use: "list", Short: "List components", Args: cobra.NoArgs}
+	var managedOnly, all bool
+	list := &cobra.Command{Use: "list", Short: "List actionable components", Args: cobra.NoArgs}
+	list.Flags().BoolVar(&managedOnly, "managed", false, "list only ToolTend-managed components")
+	list.Flags().BoolVar(&all, "all", false, "include dependency-only and host-owned observations")
 	list.RunE = a.run("components list", func(ctx context.Context) (any, error) {
+		if managedOnly && all {
+			return nil, cliError("invalid_argument", "--managed cannot be combined with --all", nil)
+		}
 		paths, err := a.paths()
 		if err != nil {
 			return nil, err
@@ -151,7 +173,13 @@ func (a *App) newComponentsCommand() *cobra.Command {
 			return nil, err
 		}
 		defer database.Close()
-		return listComponentSummaries(ctx, database)
+		mode := componentListActionable
+		if managedOnly {
+			mode = componentListManaged
+		} else if all {
+			mode = componentListAll
+		}
+		return listComponentSummaries(ctx, database, mode)
 	})
 	show := &cobra.Command{Use: "show <component>", Short: "Show a component and all bindings", Args: cobra.ExactArgs(1)}
 	show.RunE = func(cmd *cobra.Command, args []string) error {
@@ -176,7 +204,15 @@ func (a *App) newComponentsCommand() *cobra.Command {
 	return command
 }
 
-func listComponentSummaries(ctx context.Context, database *store.Store) ([]componentSummary, error) {
+type componentListMode int
+
+const (
+	componentListActionable componentListMode = iota
+	componentListManaged
+	componentListAll
+)
+
+func listComponentSummaries(ctx context.Context, database *store.Store, mode componentListMode) ([]componentSummary, error) {
 	components, err := database.ListComponents(ctx)
 	if err != nil {
 		return nil, err
@@ -191,10 +227,31 @@ func listComponentSummaries(ctx context.Context, database *store.Store) ([]compo
 		if err != nil {
 			return nil, err
 		}
-		item := componentSummary{Component: component, Source: source, Bindings: len(bindings), Status: "current"}
+		visible := bindings[:0]
 		for _, binding := range bindings {
+			switch mode {
+			case componentListManaged:
+				if binding.Managed {
+					visible = append(visible, binding)
+				}
+			case componentListAll:
+				visible = append(visible, binding)
+			default:
+				if !binding.HostOwned() {
+					visible = append(visible, binding)
+				}
+			}
+		}
+		if mode != componentListAll && len(visible) == 0 {
+			continue
+		}
+		item := componentSummary{Component: component, Source: source, Bindings: len(visible), Status: "current"}
+		for _, binding := range visible {
 			if binding.Managed {
 				item.Managed++
+			}
+			if binding.HostOwned() {
+				item.HostOwnedBindings++
 			}
 			candidates, listErr := database.ListCandidates(ctx, binding.ID, "")
 			if listErr != nil {

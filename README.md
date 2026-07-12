@@ -112,6 +112,8 @@ tooltend init
 tooltend scan
 tooltend status
 tooltend components list
+tooltend components list --managed
+tooltend components list --all
 tooltend components show <component>
 tooltend policy set <component>
 tooltend update [component | --all]
@@ -125,6 +127,8 @@ tooltend doctor [--repair]
 ```
 
 所有命令支持 `--json`；写操作支持 `--dry-run`。在非交互或 JSON 模式中，未提供 `--yes` 的写操作返回 `confirmation_required` 和完整预览，不会提示或偷偷写入。
+
+`components list` 默认只显示具有真实 Binding、且生命周期不由 Codex 等 Host 自身管理的组件；`--managed` 只显示已 adopt 的 Binding，`--all` 用于查看包含声明依赖和 Host-owned 缓存在内的完整发现结果。Codex 插件缓存仅作观察，不参与 ToolTend 更新检查，也不能 adopt。
 
 JSON 输出使用稳定的 V1 envelope：
 

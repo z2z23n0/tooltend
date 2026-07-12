@@ -113,6 +113,29 @@ func TestUpdateConfirmationRejectsChangedActiveGeneration(t *testing.T) {
 	}
 }
 
+func TestHostOwnedBindingCannotBeAdopted(t *testing.T) {
+	fixture := newLifecycleFixture(t, model.ComponentPlugin, adapter.SourceGit)
+	fixture.seedBindingOnly(t, false, model.ApplyIgnore)
+	binding, err := fixture.database.GetBinding(context.Background(), "binding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding.InstallMethod = model.HostOwnedInstallMethod(model.HostCodex)
+	if err := fixture.database.UpsertBinding(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	options := AdoptOptions{Source: "https://example.test/tooltend-plugin", Version: "v1"}
+	if _, err := fixture.service.ResolveAdopt(context.Background(), "component", options); err == nil || !strings.Contains(err.Error(), "owned by codex") {
+		t.Fatalf("host-owned preview was not rejected: %v", err)
+	}
+	if _, err := fixture.service.Adopt(context.Background(), "component", options); err == nil || !strings.Contains(err.Error(), "owned by codex") {
+		t.Fatalf("host-owned adoption was not rejected: %v", err)
+	}
+	if fixture.provider.resolveCalls != 0 || fixture.provider.fetchCalls != 0 {
+		t.Fatalf("host-owned adoption reached adapter: resolve=%d fetch=%d", fixture.provider.resolveCalls, fixture.provider.fetchCalls)
+	}
+}
+
 func TestNoBaselineStagesForReviewAndNeverActivates(t *testing.T) {
 	fixture := newLifecycleFixture(t, model.ComponentPlugin, adapter.SourceGit)
 	fixture.seedKnownSource(t, true, model.ApplyAuto)

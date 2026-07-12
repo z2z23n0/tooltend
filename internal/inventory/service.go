@@ -94,6 +94,7 @@ func Persist(ctx context.Context, database *store.Store, report Report) (Persist
 
 	componentIDs := make(map[string]string)
 	manualDefaults := make(map[string]bool)
+	hostOwnedDefaults := make(map[string]bool)
 	observations := make(map[string]host.Observation, len(report.HostResult.Observations))
 	for _, observation := range report.HostResult.Observations {
 		observations[observation.Key] = observation
@@ -115,6 +116,7 @@ func Persist(ctx context.Context, database *store.Store, report Report) (Persist
 		}
 		componentIDs[observation.Key] = componentID
 		classification := classifyObservation(observation)
+		hostOwnedDefaults[observation.Key] = lifecycleOwner(observation) != ""
 		manualDefaults[observation.Key] = classification != model.ClassificationClean ||
 			source.Kind == model.SourceUnknown || source.Kind == model.SourceLocal || source.Kind == model.SourceHTTP ||
 			source.Kind == model.SourceNPM || source.Kind == model.SourcePyPI || source.Kind == model.SourceHomebrew ||
@@ -148,6 +150,7 @@ func Persist(ctx context.Context, database *store.Store, report Report) (Persist
 				dependencyObservation := host.Observation{
 					Kind: host.ComponentKind("cli"), Name: dependencyName(identity),
 					Path: dependencyPath, Source: dependency.Source,
+					Metadata: lifecycleMetadata(observation),
 				}
 				dependencySource := sourceFromObservation(dependencyObservation, now)
 				if err := database.UpsertSource(ctx, dependencySource); err != nil {
@@ -227,16 +230,7 @@ func Persist(ctx context.Context, database *store.Store, report Report) (Persist
 			return result, err
 		}
 		existingByID[bindingID] = value
-		if _, err := database.GetPolicy(ctx, bindingID); errors.Is(err, sql.ErrNoRows) {
-			policy := model.DefaultPolicy()
-			policy.BindingID, policy.UpdatedAt = bindingID, now
-			if manualDefaults[binding.ComponentKey] || managedComponents[binding.ComponentKey] != "" {
-				policy.ApplyMode = model.ApplyManual
-			}
-			if err := database.SetPolicy(ctx, policy); err != nil {
-				return result, err
-			}
-		} else if err != nil {
+		if err := ensureBindingPolicy(ctx, database, value, manualDefaults[binding.ComponentKey] || managedComponents[binding.ComponentKey] != "", hostOwnedDefaults[binding.ComponentKey], now); err != nil {
 			return result, err
 		}
 		result.Bindings++
@@ -290,7 +284,7 @@ func Persist(ctx context.Context, database *store.Store, report Report) (Persist
 			ID: bindingID, ComponentID: candidate.componentID,
 			Host: expectedHost, ProjectID: projectID,
 			Scope: expectedScope, InstallPath: installPath,
-			InstallMethod: dependencyInstallMethod(candidate.dependency.Carrier),
+			InstallMethod: installMethodForObservation(candidate.observation, dependencyInstallMethod(candidate.dependency.Carrier)),
 			Managed:       false, Classification: classification, ObservedVersion: version, LastSeenAt: now,
 		}
 		if existing, ok := existingByID[bindingID]; ok && existing.Managed {
@@ -301,13 +295,7 @@ func Persist(ctx context.Context, database *store.Store, report Report) (Persist
 			return result, err
 		}
 		existingByID[bindingID] = value
-		if _, err := database.GetPolicy(ctx, bindingID); errors.Is(err, sql.ErrNoRows) {
-			policy := model.DefaultPolicy()
-			policy.BindingID, policy.ApplyMode, policy.LocalCapMode, policy.UpdatedAt = bindingID, model.ApplyManual, model.ApplyManual, now
-			if err := database.SetPolicy(ctx, policy); err != nil {
-				return result, err
-			}
-		} else if err != nil {
+		if err := ensureBindingPolicy(ctx, database, value, true, lifecycleOwner(candidate.observation) != "", now); err != nil {
 			return result, err
 		}
 		result.Bindings++
@@ -336,6 +324,52 @@ func dependencyInstallMethod(carrier string) string {
 	}
 }
 
+func lifecycleOwner(observation host.Observation) model.HostKind {
+	owner := model.HostKind(strings.TrimSpace(observation.Metadata[host.MetadataLifecycleOwner]))
+	if model.HostOwnedInstallMethod(owner) == "" {
+		return ""
+	}
+	return owner
+}
+
+func lifecycleMetadata(observation host.Observation) map[string]string {
+	owner := lifecycleOwner(observation)
+	if owner == "" {
+		return nil
+	}
+	return map[string]string{host.MetadataLifecycleOwner: string(owner)}
+}
+
+func installMethodForObservation(observation host.Observation, fallback string) string {
+	if method := model.HostOwnedInstallMethod(lifecycleOwner(observation)); method != "" {
+		return method
+	}
+	return fallback
+}
+
+func ensureBindingPolicy(ctx context.Context, database *store.Store, binding model.Binding, manual, hostOwned bool, now time.Time) error {
+	policy, err := database.GetPolicy(ctx, binding.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		policy = model.DefaultPolicy()
+		policy.BindingID, policy.UpdatedAt = binding.ID, now
+		if manual {
+			policy.ApplyMode = model.ApplyManual
+		}
+		if hostOwned && !binding.Managed {
+			policy.ApplyMode, policy.LocalCapMode = model.ApplyIgnore, model.ApplyIgnore
+		}
+		return database.SetPolicy(ctx, policy)
+	}
+	if err != nil {
+		return err
+	}
+	if hostOwned && !binding.Managed && (policy.ApplyMode != model.ApplyIgnore || policy.LocalCapMode != model.ApplyIgnore) {
+		policy.ApplyMode, policy.LocalCapMode, policy.UpdatedAt = model.ApplyIgnore, model.ApplyIgnore, now
+		return database.SetPolicy(ctx, policy)
+	}
+	return nil
+}
+
 func managedDependencyBinding(values map[string]model.Binding, componentID string, hostValue model.HostKind, scope model.ScopeKind, projectID, executable string) (model.Binding, bool) {
 	executable = filepath.Base(strings.TrimSpace(executable))
 	var match model.Binding
@@ -354,6 +388,9 @@ func managedDependencyBinding(values map[string]model.Binding, componentID strin
 }
 
 func observedInstallMethod(observation host.Observation) string {
+	if method := installMethodForObservation(observation, ""); method != "" {
+		return method
+	}
 	kind := sourceKind(observation.Source.Kind)
 	if (observation.Kind == host.ComponentStdioMCP || observation.Kind == host.ComponentKind("cli")) &&
 		(kind == model.SourceNPM || kind == model.SourcePyPI) {

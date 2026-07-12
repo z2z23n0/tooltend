@@ -48,6 +48,9 @@ func (s *Service) adopt(ctx context.Context, selector string, options AdoptOptio
 	if binding.Managed {
 		return AdoptResult{}, errors.New("lifecycle: binding is already managed")
 	}
+	if binding.HostOwned() {
+		return AdoptResult{}, fmt.Errorf("lifecycle: binding lifecycle is owned by %s", binding.LifecycleOwner())
+	}
 	resolvedSource, err := s.resolveAdoptSource(options)
 	if err != nil {
 		return AdoptResult{}, err

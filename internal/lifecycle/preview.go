@@ -83,6 +83,9 @@ func (s *Service) ResolveAdopt(ctx context.Context, selector string, options Ado
 	if binding.Managed {
 		return AdoptTarget{}, errors.New("lifecycle: binding is already managed")
 	}
+	if binding.HostOwned() {
+		return AdoptTarget{}, fmt.Errorf("lifecycle: binding lifecycle is owned by %s", binding.LifecycleOwner())
+	}
 	resolvedSource, err := s.resolveAdoptSource(options)
 	if err != nil {
 		return AdoptTarget{}, err

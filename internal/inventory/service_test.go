@@ -53,6 +53,72 @@ func TestPersistClassifiesInitialObservations(t *testing.T) {
 	}
 }
 
+func TestPersistForcesHostOwnedBindingsAndDependenciesToIgnore(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t)
+	executable := filepath.Join(t.TempDir(), "bin", "plugin-cli")
+	if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	observation := host.Observation{
+		Key: "plugin-skill", Host: host.Codex, Kind: host.ComponentSkill, Name: "plugin-skill",
+		Path: "/cache/plugin/skills/plugin-skill", Scope: host.ScopePlugin,
+		Source:   host.SourceRef{Kind: "local", Locator: "/cache/plugin/skills/plugin-skill"},
+		Metadata: map[string]string{"lifecycle_owner": string(host.Codex)},
+		Dependencies: []host.DependencyRef{{
+			PackageIdentity: "npm:plugin-cli", Constraint: "1.2.3",
+			Source:     host.SourceRef{Kind: "npm", Package: "plugin-cli", Version: "1.2.3"},
+			Executable: "plugin-cli", InstallPath: executable, Carrier: "npx",
+			EvidencePath: "/cache/plugin/skills/plugin-skill/SKILL.md", EvidenceLine: 8,
+		}},
+	}
+	report := Report{HostResult: host.Result{
+		Observations: []host.Observation{observation},
+		Bindings:     []host.Binding{{Host: host.Codex, ComponentKey: observation.Key, Scope: host.ScopePlugin, InstallPath: observation.Path}},
+	}}
+	if _, err := Persist(ctx, database, report); err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := database.ListBindings(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("bindings = %#v", bindings)
+	}
+	for _, binding := range bindings {
+		if binding.InstallMethod != "host-owned:codex" {
+			t.Errorf("%s install method = %q", binding.InstallPath, binding.InstallMethod)
+		}
+		policy, policyErr := database.GetPolicy(ctx, binding.ID)
+		if policyErr != nil {
+			t.Fatal(policyErr)
+		}
+		if policy.ApplyMode != model.ApplyIgnore || policy.LocalCapMode != model.ApplyIgnore {
+			t.Errorf("%s policy = %#v", binding.InstallPath, policy)
+		}
+		policy.ApplyMode, policy.LocalCapMode, policy.UpdatedAt = model.ApplyAuto, model.ApplyAuto, time.Now().UTC()
+		if err := database.SetPolicy(ctx, policy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Persist(ctx, database, report); err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range bindings {
+		policy, err := database.GetPolicy(ctx, binding.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policy.ApplyMode != model.ApplyIgnore || policy.LocalCapMode != model.ApplyIgnore {
+			t.Errorf("host-owned policy was loosened: %#v", policy)
+		}
+	}
+}
+
 func TestPersistPreservesManagedBindingAndPolicy(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t)

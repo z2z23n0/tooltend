@@ -28,6 +28,9 @@ url = "https://url-user:url-password@example.test/mcp?token=url-query-secret#fra
 bearer_token_env_var = "REMOTE_TOKEN"
 http_headers = { Authorization = "Bearer static-header-secret", X_Key = "static-x-secret" }
 env_http_headers = { X_Dynamic = "DYNAMIC_TOKEN" }
+
+[plugins."configured@openai-bundled"]
+enabled = true
 `)
 	mustWriteFile(t, filepath.Join(home, ".codex", "hooks.json"), `{
   "unknown": {"keep": true},
@@ -132,8 +135,18 @@ env_vars = ["PROJECT_TOKEN"]
 	if !legacy.Legacy {
 		t.Error("legacy Codex skill was not marked legacy")
 	}
-	assertObservation(t, result, Codex, ComponentPlugin, "codex-plugin")
-	assertObservation(t, result, Codex, ComponentStdioMCP, "codex-plugin:plugin_server")
+	configuredPlugin := assertObservation(t, result, Codex, ComponentPlugin, "configured")
+	if configuredPlugin.Metadata["lifecycle_owner"] != string(Codex) {
+		t.Fatalf("configured plugin lifecycle owner = %q", configuredPlugin.Metadata["lifecycle_owner"])
+	}
+	cachePlugin := assertObservation(t, result, Codex, ComponentPlugin, "codex-plugin")
+	cacheSkill := assertObservation(t, result, Codex, ComponentSkill, "codex-plugin-skill")
+	cacheMCP := assertObservation(t, result, Codex, ComponentStdioMCP, "codex-plugin:plugin_server")
+	for _, observation := range []Observation{cachePlugin, cacheSkill, cacheMCP} {
+		if observation.Metadata["lifecycle_owner"] != string(Codex) {
+			t.Errorf("cache observation %s lifecycle owner = %q", observation.Name, observation.Metadata["lifecycle_owner"])
+		}
+	}
 	assertObservation(t, result, Claude, ComponentStdioMCP, "user_server")
 	assertObservation(t, result, Claude, ComponentHTTPMCP, "selected_server")
 	assertObservation(t, result, Claude, ComponentHTTPMCP, "project_http")

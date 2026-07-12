@@ -29,6 +29,8 @@ const (
 
 type ComponentKind string
 
+const MetadataLifecycleOwner = "lifecycle_owner"
+
 const (
 	ComponentSkill    ComponentKind = "skill"
 	ComponentPlugin   ComponentKind = "plugin"
