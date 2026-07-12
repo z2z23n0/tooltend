@@ -230,7 +230,7 @@ func Persist(ctx context.Context, database *store.Store, report Report) (Persist
 			return result, err
 		}
 		existingByID[bindingID] = value
-		if err := ensureBindingPolicy(ctx, database, value, manualDefaults[binding.ComponentKey] || managedComponents[binding.ComponentKey] != "", hostOwnedDefaults[binding.ComponentKey], now); err != nil {
+		if err := ensureBindingPolicy(ctx, database, value, manualDefaults[binding.ComponentKey] || managedComponents[binding.ComponentKey] != "", false, hostOwnedDefaults[binding.ComponentKey], now); err != nil {
 			return result, err
 		}
 		result.Bindings++
@@ -295,7 +295,7 @@ func Persist(ctx context.Context, database *store.Store, report Report) (Persist
 			return result, err
 		}
 		existingByID[bindingID] = value
-		if err := ensureBindingPolicy(ctx, database, value, true, lifecycleOwner(candidate.observation) != "", now); err != nil {
+		if err := ensureBindingPolicy(ctx, database, value, true, true, lifecycleOwner(candidate.observation) != "", now); err != nil {
 			return result, err
 		}
 		result.Bindings++
@@ -347,13 +347,16 @@ func installMethodForObservation(observation host.Observation, fallback string) 
 	return fallback
 }
 
-func ensureBindingPolicy(ctx context.Context, database *store.Store, binding model.Binding, manual, hostOwned bool, now time.Time) error {
+func ensureBindingPolicy(ctx context.Context, database *store.Store, binding model.Binding, manual, manualCap, hostOwned bool, now time.Time) error {
 	policy, err := database.GetPolicy(ctx, binding.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		policy = model.DefaultPolicy()
 		policy.BindingID, policy.UpdatedAt = binding.ID, now
 		if manual {
 			policy.ApplyMode = model.ApplyManual
+		}
+		if manualCap {
+			policy.LocalCapMode = model.ApplyManual
 		}
 		if hostOwned && !binding.Managed {
 			policy.ApplyMode, policy.LocalCapMode = model.ApplyIgnore, model.ApplyIgnore
