@@ -219,7 +219,7 @@ func (a *App) newInitCommand() *cobra.Command {
 					bundleInventory, openErr = bundle.Discover(ctx, database, bundle.DiscoverOptions{
 						HomeDir: a.home, Executable: a.executable, BuildVersion: buildinfo.Version,
 						LocalRecipeDir: filepath.Join(paths.ConfigDir, "bundles.d"),
-						LookupPath: a.lookupPath,
+						LookupPath:     a.lookupPath,
 					})
 					return openErr
 				},
@@ -710,7 +710,7 @@ func (a *App) newScanCommand() *cobra.Command {
 						bundleInventory, persistErr = bundle.Discover(ctx, database, bundle.DiscoverOptions{
 							HomeDir: a.home, Executable: a.executable, BuildVersion: buildinfo.Version,
 							LocalRecipeDir: filepath.Join(paths.ConfigDir, "bundles.d"),
-							LookupPath: a.lookupPath,
+							LookupPath:     a.lookupPath,
 						})
 						return persistErr
 					})
