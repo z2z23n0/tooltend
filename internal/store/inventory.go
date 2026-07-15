@@ -367,6 +367,26 @@ func (s *Store) PutDependency(ctx context.Context, value model.Dependency) error
 	return err
 }
 
+func (s *Store) ListDependencies(ctx context.Context) ([]model.Dependency, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,from_component_id,to_component_id,package_identity,constraint_text,evidence_path,evidence_line,explicit FROM dependencies ORDER BY from_component_id,package_identity,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []model.Dependency{}
+	for rows.Next() {
+		var value model.Dependency
+		var to sql.NullString
+		var explicit int
+		if err := rows.Scan(&value.ID, &value.FromComponentID, &to, &value.PackageIdentity, &value.Constraint, &value.EvidencePath, &value.EvidenceLine, &explicit); err != nil {
+			return nil, err
+		}
+		value.ToComponentID, value.Explicit = to.String, explicit != 0
+		result = append(result, value)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) PutGeneration(ctx context.Context, value model.Generation) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO generations(id,binding_id,candidate_id,resolved_ref,tree_hash,integrity_hash,state,created_at,activated_at) VALUES(?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET candidate_id=excluded.candidate_id,resolved_ref=excluded.resolved_ref,tree_hash=excluded.tree_hash,integrity_hash=excluded.integrity_hash,state=excluded.state,activated_at=excluded.activated_at`,

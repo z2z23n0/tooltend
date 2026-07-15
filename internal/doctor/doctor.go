@@ -93,8 +93,9 @@ func Run(ctx context.Context, paths config.Paths) Report {
 		if version == store.SchemaVersion {
 			activations, activationErr := database.ListUnfinishedActivations(ctx)
 			adoptions, adoptionErr := database.ListPendingAdoptions(ctx)
+			bundleTransactions, bundleErr := database.ListUnfinishedBundleTransactions(ctx)
 			switch {
-			case activationErr != nil || adoptionErr != nil:
+			case activationErr != nil || adoptionErr != nil || bundleErr != nil:
 				appendCheck(Check{Name: "lifecycle_journal", Level: LevelError, Message: "lifecycle recovery journals cannot be inspected", Repairable: false})
 			default:
 				blocked := false
@@ -103,11 +104,22 @@ func Run(ctx context.Context, paths config.Paths) Report {
 				}
 				if blocked {
 					appendCheck(Check{Name: "lifecycle_journal", Level: LevelError, Message: "an adoption recovery is blocked by externally changed state", Repairable: false})
-				} else if len(activations)+len(adoptions) != 0 {
+				} else if len(activations)+len(adoptions)+len(bundleTransactions) != 0 {
 					appendCheck(Check{Name: "lifecycle_journal", Level: LevelWarning, Message: "unfinished lifecycle operations are waiting for recovery", Repairable: true})
 				} else {
 					appendCheck(Check{Name: "lifecycle_journal", Level: LevelOK, Message: "lifecycle recovery journals are clear"})
 				}
+			}
+			counts, countErr := database.BundleCounts(ctx)
+			switch {
+			case countErr != nil:
+				appendCheck(Check{Name: "bundle_coverage", Level: LevelError, Message: "bundle management coverage cannot be inspected", Repairable: false})
+			case counts.Total == 0:
+				appendCheck(Check{Name: "bundle_coverage", Level: LevelWarning, Message: "bundle discovery has not been persisted; run tooltend scan", Repairable: true})
+			case counts.Configured == 0:
+				appendCheck(Check{Name: "bundle_coverage", Level: LevelWarning, Message: fmt.Sprintf("infrastructure is healthy and %d bundles were discovered, but management coverage is zero; run tooltend bundles configure", counts.Total)})
+			default:
+				appendCheck(Check{Name: "bundle_coverage", Level: LevelOK, Message: fmt.Sprintf("%d of %d bundles are configured", counts.Configured, counts.Total)})
 			}
 		}
 	}

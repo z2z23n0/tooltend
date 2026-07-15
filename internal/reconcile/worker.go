@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/z2z23n0/tooltend/internal/bundle"
 	"github.com/z2z23n0/tooltend/internal/config"
 	"github.com/z2z23n0/tooltend/internal/inventory"
 	"github.com/z2z23n0/tooltend/internal/kick"
@@ -33,6 +34,8 @@ type InventoryOptions struct {
 }
 
 type InventoryFunc func(context.Context, *store.Store, InventoryOptions) (inventory.PersistResult, error)
+type BundleInventoryFunc func(context.Context, *store.Store) (bundle.DiscoverResult, error)
+type BundleRecoveryFunc func(context.Context) (bundle.RecoveryResult, error)
 
 type Worker struct {
 	Database *store.Store
@@ -43,14 +46,17 @@ type Worker struct {
 	// reconciliation deliberately ignores process cwd and scans Config.Projects
 	// only; init and explicit scan pass their working directory directly to the
 	// inventory package.
-	CurrentProject string
-	Coordinator    Coordinator
-	RuntimeAdopter RuntimeAdopter
-	Inventory      InventoryFunc
-	Recover        RecoveryFunc
-	Now            func() time.Time
-	Lease          time.Duration
-	MaxTasks       int
+	CurrentProject    string
+	Coordinator       Coordinator
+	RuntimeAdopter    RuntimeAdopter
+	BundleCoordinator BundleCoordinator
+	Inventory         InventoryFunc
+	BundleInventory   BundleInventoryFunc
+	BundleRecovery    BundleRecoveryFunc
+	Recover           RecoveryFunc
+	Now               func() time.Time
+	Lease             time.Duration
+	MaxTasks          int
 }
 
 func (w *Worker) RunOnce(ctx context.Context, reason string) (RunResult, error) {
@@ -89,6 +95,13 @@ func (w *Worker) RunOnce(ctx context.Context, reason string) (RunResult, error) 
 		finish()
 		return result, fmt.Errorf("reconcile: activation recovery failed: %w", err)
 	}
+	if w.BundleRecovery != nil {
+		result.BundleRecovery, err = w.BundleRecovery(ctx)
+		if err != nil {
+			finish()
+			return result, fmt.Errorf("reconcile: bundle transaction recovery failed: %w", err)
+		}
+	}
 
 	scanID, err := model.NewID("scan")
 	if err != nil {
@@ -118,11 +131,38 @@ func (w *Worker) RunOnce(ctx context.Context, reason string) (RunResult, error) 
 		finish()
 		return result, fmt.Errorf("reconcile: finish scan: %w", err)
 	}
+	if w.BundleInventory != nil {
+		if _, err := w.BundleInventory(ctx, w.Database); err != nil {
+			finish()
+			return result, fmt.Errorf("reconcile: bundle discovery failed: %w", err)
+		}
+	}
 
 	signal, err := hookSignal(ctx, w.Database)
 	if err != nil {
 		finish()
 		return result, fmt.Errorf("reconcile: read hook signal: %w", err)
+	}
+	bundleCounts, err := w.Database.BundleCounts(ctx)
+	if err != nil {
+		finish()
+		return result, err
+	}
+	if bundleCounts.Total > 0 {
+		if err := w.scheduleBundleTasks(ctx, signal, started, &result); err != nil {
+			finish()
+			return result, err
+		}
+		if err := markHookSignalsProcessed(ctx, w.Database, signal, started); err != nil {
+			finish()
+			return result, fmt.Errorf("reconcile: acknowledge hook signal: %w", err)
+		}
+		if err := w.runBundleTasks(ctx, &result); err != nil {
+			finish()
+			return result, err
+		}
+		finish()
+		return result, nil
 	}
 	bindings, err := w.Database.ListBindings(ctx, "")
 	if err != nil {
@@ -179,6 +219,116 @@ func (w *Worker) RunOnce(ctx context.Context, reason string) (RunResult, error) 
 	}
 	finish()
 	return result, nil
+}
+
+func (w *Worker) scheduleBundleTasks(ctx context.Context, signal int64, started time.Time, result *RunResult) error {
+	values, err := w.Database.ListBundles(ctx)
+	if err != nil {
+		return err
+	}
+	for _, value := range values {
+		if value.ConfigState != model.BundleConfigured {
+			result.Skipped++
+			continue
+		}
+		policy, err := w.Database.GetBundlePolicy(ctx, value.ID)
+		if err != nil {
+			return err
+		}
+		kind := ""
+		switch policy.Mode {
+		case model.BundlePolicyAuto:
+			kind = "update"
+		case model.BundlePolicyManual:
+			kind = "check"
+		case model.BundlePolicyObserve, model.BundlePolicyIgnore:
+			result.Skipped++
+			continue
+		}
+		key := w.bundleIdempotencyKey(value, policy, signal, started)
+		task := model.BundleTask{ID: stableTaskID("bundle:" + key), BundleID: value.ID, Kind: kind, IdempotencyKey: "bundle:" + key,
+			Status: model.TaskPending, NextAttemptAt: started, CreatedAt: started, UpdatedAt: started}
+		inserted, err := w.Database.EnqueueBundleTask(ctx, task)
+		if err != nil {
+			return err
+		}
+		if inserted {
+			result.Scheduled++
+		}
+	}
+	return nil
+}
+
+func (w *Worker) runBundleTasks(ctx context.Context, result *RunResult) error {
+	lease := w.Lease
+	if lease <= 0 {
+		lease = defaultLease
+	}
+	limit := w.MaxTasks
+	if limit <= 0 {
+		limit = defaultMaxTasks
+	}
+	for processed := 0; processed < limit; processed++ {
+		now := w.now()
+		task, err := w.Database.ClaimBundleTask(ctx, now, lease)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		value, err := w.Database.GetBundle(ctx, task.BundleID)
+		if err != nil {
+			_ = w.Database.FailBundleTask(ctx, task.ID, "bundle_unavailable")
+			result.Failed++
+			continue
+		}
+		policy, err := w.Database.GetBundlePolicy(ctx, value.ID)
+		if err != nil || value.ConfigState != model.BundleConfigured {
+			_ = w.Database.FailBundleTask(ctx, task.ID, "bundle_policy_unavailable")
+			result.Failed++
+			continue
+		}
+		if w.BundleCoordinator == nil {
+			_ = w.Database.FailBundleTask(ctx, task.ID, "bundle_coordinator_unavailable")
+			result.Failed++
+			continue
+		}
+		activate := task.Kind == "update" && policy.Mode == model.BundlePolicyAuto
+		err = w.BundleCoordinator.ReconcileBundle(ctx, value, policy, activate)
+		if err == nil {
+			if err := w.Database.CompleteBundleTask(ctx, task.ID); err != nil {
+				return err
+			}
+			result.Succeeded++
+			continue
+		}
+		code, retryable := classifyError(err)
+		if retryable && task.Attempts < maxAttempts {
+			if err := w.Database.RetryBundleTask(ctx, task.ID, code, now.Add(retryDelay(task.Attempts))); err != nil {
+				return err
+			}
+			result.Retried++
+			continue
+		}
+		if err := w.Database.FailBundleTask(ctx, task.ID, code); err != nil {
+			return err
+		}
+		result.Failed++
+	}
+	return nil
+}
+
+func (w *Worker) bundleIdempotencyKey(value model.Bundle, policy model.BundlePolicy, signal int64, now time.Time) string {
+	interval := w.Config.Check.Interval
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	slot := now.UnixNano() / interval.Nanoseconds()
+	material := strings.Join([]string{"reconcile-bundle-v1", value.ID, value.CurrentReleaseID, string(policy.Mode),
+		strconv.FormatInt(policy.UpdatedAt.UnixNano(), 10), strconv.FormatInt(slot, 10), strconv.FormatInt(signal, 10)}, "\x00")
+	hash := sha256.Sum256([]byte(material))
+	return hex.EncodeToString(hash[:])
 }
 
 func (w *Worker) runTasks(ctx context.Context, reason string, result *RunResult) error {

@@ -1,0 +1,29 @@
+schema = "bundle-recipe-v1"
+id = "tooltend"
+version = "1"
+name = "ToolTend"
+owner = "tooltend"
+confidence = "high"
+description = "ToolTend CLI and its owned hooks and scheduler"
+
+[[artifacts]]
+key = "cli"
+name = "ToolTend CLI"
+kind = "cli"
+driver = "self-update"
+required = true
+probes = ["command:tooltend"]
+health_argv = ["tooltend", "version", "--json"]
+[[artifacts.selectors]]
+field = "name"
+equals = "tooltend"
+
+[[artifacts]]
+key = "integrations"
+name = "ToolTend hooks and scheduler"
+kind = "hook"
+driver = "tooltend-integrations"
+required = false
+[[artifacts.selectors]]
+field = "dependency"
+equals = "cli:tooltend"

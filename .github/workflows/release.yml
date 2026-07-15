@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: true
+      - name: Validate stable tag
+        run: |
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - name: Read release public key
+        id: release-key
+        env:
+          TOOLTEND_RELEASE_PRIVATE_KEY_B64: ${{ secrets.TOOLTEND_RELEASE_PRIVATE_KEY_B64 }}
+        run: |
+          public_key="$(go run ./cmd/release-manifest --public-key)"
+          echo "public_key=$public_key" >> "$GITHUB_OUTPUT"
+      - name: Build release assets
+        env:
+          PUBLIC_KEY: ${{ steps.release-key.outputs.public_key }}
+        run: |
+          mkdir -p dist
+          version="${GITHUB_REF_NAME#v}"
+          sequence="$(go run ./cmd/release-manifest --sequence --version "$GITHUB_REF_NAME")"
+          commit="$(git rev-parse HEAD)"
+          build_date="$(git show -s --format=%cI HEAD)"
+          ldflags="-s -w -X github.com/z2z23n0/tooltend/internal/buildinfo.Version=$version -X github.com/z2z23n0/tooltend/internal/buildinfo.Commit=$commit -X github.com/z2z23n0/tooltend/internal/buildinfo.Date=$build_date -X github.com/z2z23n0/tooltend/internal/buildinfo.Sequence=$sequence -X github.com/z2z23n0/tooltend/internal/selfupdate.ReleasePublicKeyHex=$PUBLIC_KEY"
+          for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$ldflags" -o "dist/tooltend-$os-$arch" ./cmd/tooltend
+          done
+      - name: Sign release manifest
+        env:
+          TOOLTEND_RELEASE_PRIVATE_KEY_B64: ${{ secrets.TOOLTEND_RELEASE_PRIVATE_KEY_B64 }}
+        run: |
+          go run ./cmd/release-manifest \
+            --version "$GITHUB_REF_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --assets-dir "$PWD/dist" \
+            --published-at "$(git show -s --format=%cI HEAD)" \
+            --output dist/tooltend-manifest.json \
+            --checksums dist/checksums.txt
+      - name: Verify signed release payload
+        run: |
+          test "$(find dist -maxdepth 1 -type f -name 'tooltend-*' ! -name 'tooltend-manifest.json' | wc -l | tr -d ' ')" = "4"
+          test -s dist/tooltend-manifest.json
+          test -s dist/checksums.txt
+          version="${GITHUB_REF_NAME#v}"
+          sequence="$(go run ./cmd/release-manifest --sequence --version "$GITHUB_REF_NAME")"
+          TOOLTEND_HOME="$PWD/dist/self-test" ./dist/tooltend-linux-amd64 self status --json > dist/self-status.json
+          grep -q "\"version\":\"$version\"" dist/self-status.json
+          grep -q "\"release_sequence\":$sequence" dist/self-status.json
+          grep -q '"embedded":true' dist/self-status.json
+          grep -q '"valid":true' dist/self-status.json
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/tooltend-darwin-arm64 \
+            dist/tooltend-darwin-amd64 \
+            dist/tooltend-linux-arm64 \
+            dist/tooltend-linux-amd64 \
+            dist/tooltend-manifest.json \
+            dist/checksums.txt \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

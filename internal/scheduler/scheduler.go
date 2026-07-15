@@ -102,6 +102,29 @@ func Activate(ctx context.Context, schedule Plan, runner execx.Runner) error {
 	}
 }
 
+// Deactivate pauses the registered one-shot schedule without deleting its
+// files. A reset uses this before snapshotting state and re-activates either
+// the new schedule or the restored old schedule.
+func Deactivate(ctx context.Context, schedule Plan, runner execx.Runner) error {
+	if runner == nil {
+		runner = execx.ExecRunner{}
+	}
+	switch schedule.Platform {
+	case "launchd":
+		if len(schedule.Files) != 1 {
+			return errors.New("scheduler: invalid launchd plan")
+		}
+		domain := "gui/" + strconv.Itoa(os.Getuid())
+		_, err := runner.Run(ctx, "launchctl", "bootout", domain, schedule.Files[0].Path)
+		return err
+	case "systemd":
+		_, err := runner.Run(ctx, "systemctl", "--user", "disable", "--now", "tooltend-reconcile.timer")
+		return err
+	default:
+		return fmt.Errorf("scheduler: unsupported plan platform %q", schedule.Platform)
+	}
+}
+
 func randomDailyTime() (int, int) {
 	var value uint16
 	if err := binary.Read(rand.Reader, binary.LittleEndian, &value); err != nil {

@@ -1,0 +1,45 @@
+schema = "bundle-recipe-v1"
+id = "mainline"
+version = "1"
+name = "Mainline"
+owner = "delegated"
+confidence = "high"
+description = "Mainline CLI, shared agent skill, and generated host hooks"
+
+[[artifacts]]
+key = "cli"
+name = "Mainline CLI"
+kind = "cli"
+driver = "github-release"
+required = true
+probes = ["command:mainline"]
+health_argv = ["mainline", "version"]
+[[artifacts.selectors]]
+field = "name"
+equals = "mainline"
+[[artifacts.selectors]]
+field = "kind"
+equals = "cli"
+
+[[artifacts]]
+key = "skill"
+name = "Mainline Skill"
+kind = "skill"
+driver = "npx-skills"
+required = true
+[[artifacts.selectors]]
+field = "name"
+equals = "mainline"
+[[artifacts.selectors]]
+field = "kind"
+equals = "skill"
+
+[[artifacts]]
+key = "hooks"
+name = "Mainline generated hooks"
+kind = "hook"
+driver = "mainline-hooks"
+required = false
+[[artifacts.selectors]]
+field = "dependency"
+equals = "cli:mainline"

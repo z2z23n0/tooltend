@@ -1,0 +1,28 @@
+schema = "bundle-recipe-v1"
+id = "citadel"
+version = "1"
+name = "oa-skills / Citadel"
+owner = "delegated"
+confidence = "high"
+description = "The private oa-skills npm CLI and Citadel skills"
+
+[[artifacts]]
+key = "cli"
+name = "oa-skills CLI"
+kind = "cli"
+driver = "npm"
+required = true
+probes = ["command:oa-skills"]
+[[artifacts.selectors]]
+field = "package"
+equals = "@it/oa-skills"
+
+[[artifacts]]
+key = "skill"
+name = "Citadel Skill"
+kind = "skill"
+driver = "npm-skill"
+required = true
+[[artifacts.selectors]]
+field = "name"
+equals = "citadel"

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/z2z23n0/tooltend/internal/bundle"
 	"github.com/z2z23n0/tooltend/internal/inventory"
 	"github.com/z2z23n0/tooltend/internal/model"
 )
@@ -59,6 +60,16 @@ func (f RuntimeAdopterFunc) AdoptRuntime(ctx context.Context, binding model.Bind
 	return f(ctx, binding)
 }
 
+type BundleCoordinator interface {
+	ReconcileBundle(context.Context, model.Bundle, model.BundlePolicy, bool) error
+}
+
+type BundleCoordinatorFunc func(context.Context, model.Bundle, model.BundlePolicy, bool) error
+
+func (f BundleCoordinatorFunc) ReconcileBundle(ctx context.Context, value model.Bundle, policy model.BundlePolicy, activate bool) error {
+	return f(ctx, value, policy, activate)
+}
+
 type BindingResult struct {
 	BindingID string  `json:"binding_id"`
 	TaskID    string  `json:"task_id"`
@@ -78,6 +89,7 @@ type RunResult struct {
 	StartedAt      time.Time               `json:"started_at"`
 	FinishedAt     time.Time               `json:"finished_at"`
 	Recovered      int                     `json:"recovered_activations"`
+	BundleRecovery bundle.RecoveryResult   `json:"bundle_recovery"`
 	Inventory      inventory.PersistResult `json:"inventory"`
 	Scheduled      int                     `json:"scheduled"`
 	Succeeded      int                     `json:"succeeded"`

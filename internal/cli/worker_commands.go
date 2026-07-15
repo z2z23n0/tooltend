@@ -14,6 +14,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/z2z23n0/tooltend/internal/buildinfo"
+	"github.com/z2z23n0/tooltend/internal/bundle"
 	"github.com/z2z23n0/tooltend/internal/config"
 	"github.com/z2z23n0/tooltend/internal/hook"
 	"github.com/z2z23n0/tooltend/internal/inventory"
@@ -265,6 +267,29 @@ func (a *App) reconcileOnce(ctx context.Context, paths config.Paths, reason stri
 			}
 			return inventory.Persist(scanCtx, scanDB, report)
 		},
+		BundleInventory: func(scanCtx context.Context, scanDB *store.Store) (bundle.DiscoverResult, error) {
+			return bundle.Discover(scanCtx, scanDB, bundle.DiscoverOptions{
+				HomeDir: a.home, Executable: a.executable, BuildVersion: buildinfo.Version,
+				LocalRecipeDir: filepath.Join(paths.ConfigDir, "bundles.d"),
+				LookupPath:     a.lookupPath,
+			})
+		},
+		BundleRecovery: func(recoveryCtx context.Context) (bundle.RecoveryResult, error) {
+			bundleService := bundle.Service{Database: database, Paths: paths, Runner: a.runner}
+			return bundleService.RecoverTransactions(recoveryCtx)
+		},
+		BundleCoordinator: reconcile.BundleCoordinatorFunc(func(bundleCtx context.Context, value model.Bundle, _ model.BundlePolicy, activate bool) error {
+			bundleService := bundle.Service{Database: database, Paths: paths, Runner: a.runner}
+			preview, prepareErr := bundleService.PrepareUpdate(bundleCtx, value.ID, false)
+			if prepareErr != nil {
+				return prepareErr
+			}
+			if !activate {
+				return database.UpsertBundleRelease(bundleCtx, preview.Target)
+			}
+			_, executeErr := bundleService.ExecuteUpdate(bundleCtx, preview)
+			return executeErr
+		}),
 	}
 	return worker.RunOnce(ctx, reason)
 }

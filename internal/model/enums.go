@@ -176,6 +176,83 @@ const (
 	ReceiptFailed     ReceiptStatus = "failed"
 )
 
+// LifecycleOwner identifies the authority that is allowed to mutate an
+// installation. Only tooltend and delegated owners may ever execute update
+// commands; every other owner is observation-only.
+type LifecycleOwner string
+
+const (
+	LifecycleToolTend        LifecycleOwner = "tooltend"
+	LifecycleDelegated       LifecycleOwner = "delegated"
+	LifecycleHostOwned       LifecycleOwner = "host-owned"
+	LifecycleAppOwned        LifecycleOwner = "app-owned"
+	LifecycleWorkspaceLinked LifecycleOwner = "workspace-linked"
+	LifecycleUnresolved      LifecycleOwner = "unresolved"
+)
+
+type BundlePolicyMode string
+
+const (
+	BundlePolicyAuto    BundlePolicyMode = "auto"
+	BundlePolicyManual  BundlePolicyMode = "manual"
+	BundlePolicyObserve BundlePolicyMode = "observe"
+	BundlePolicyIgnore  BundlePolicyMode = "ignore"
+)
+
+type BundleConfigState string
+
+const (
+	BundleUnconfigured BundleConfigState = "unconfigured"
+	BundleConfigured   BundleConfigState = "configured"
+)
+
+type BundleConfidence string
+
+const (
+	BundleConfidenceHigh       BundleConfidence = "high"
+	BundleConfidenceMedium     BundleConfidence = "medium"
+	BundleConfidenceLow        BundleConfidence = "low"
+	BundleConfidenceUnresolved BundleConfidence = "unresolved"
+)
+
+type ArtifactKind string
+
+const (
+	ArtifactCLI    ArtifactKind = "cli"
+	ArtifactSkill  ArtifactKind = "skill"
+	ArtifactHook   ArtifactKind = "hook"
+	ArtifactApp    ArtifactKind = "app"
+	ArtifactConfig ArtifactKind = "config"
+	ArtifactBinary ArtifactKind = "embedded_binary"
+	ArtifactPlugin ArtifactKind = "plugin"
+	ArtifactMCP    ArtifactKind = "mcp"
+)
+
+type BundleTransactionStatus string
+
+const (
+	BundleTransactionPrepared    BundleTransactionStatus = "prepared"
+	BundleTransactionStaging     BundleTransactionStatus = "staging"
+	BundleTransactionActivating  BundleTransactionStatus = "activating"
+	BundleTransactionCommitted   BundleTransactionStatus = "committed"
+	BundleTransactionRollingBack BundleTransactionStatus = "rolling_back"
+	BundleTransactionRolledBack  BundleTransactionStatus = "rolled_back"
+	BundleTransactionFailed      BundleTransactionStatus = "failed"
+)
+
+type BundleStepStatus string
+
+const (
+	BundleStepPending      BundleStepStatus = "pending"
+	BundleStepStaged       BundleStepStatus = "staged"
+	BundleStepActivating   BundleStepStatus = "activating"
+	BundleStepActivated    BundleStepStatus = "activated"
+	BundleStepHealthy      BundleStepStatus = "healthy"
+	BundleStepCompensating BundleStepStatus = "compensating"
+	BundleStepCompensated  BundleStepStatus = "compensated"
+	BundleStepFailed       BundleStepStatus = "failed"
+)
+
 func validateEnum[T ~string](name string, value T, allowed ...T) error {
 	for _, candidate := range allowed {
 		if value == candidate {
@@ -234,4 +311,25 @@ func (v ReceiptAction) Validate() error {
 }
 func (v ReceiptStatus) Validate() error {
 	return validateEnum("receipt status", v, ReceiptSucceeded, ReceiptRolledBack, ReceiptFailed)
+}
+func (v LifecycleOwner) Validate() error {
+	return validateEnum("lifecycle owner", v, LifecycleToolTend, LifecycleDelegated, LifecycleHostOwned, LifecycleAppOwned, LifecycleWorkspaceLinked, LifecycleUnresolved)
+}
+func (v BundlePolicyMode) Validate() error {
+	return validateEnum("bundle policy", v, BundlePolicyAuto, BundlePolicyManual, BundlePolicyObserve, BundlePolicyIgnore)
+}
+func (v BundleConfigState) Validate() error {
+	return validateEnum("bundle config state", v, BundleUnconfigured, BundleConfigured)
+}
+func (v BundleConfidence) Validate() error {
+	return validateEnum("bundle confidence", v, BundleConfidenceHigh, BundleConfidenceMedium, BundleConfidenceLow, BundleConfidenceUnresolved)
+}
+func (v ArtifactKind) Validate() error {
+	return validateEnum("artifact kind", v, ArtifactCLI, ArtifactSkill, ArtifactHook, ArtifactApp, ArtifactConfig, ArtifactBinary, ArtifactPlugin, ArtifactMCP)
+}
+func (v BundleTransactionStatus) Validate() error {
+	return validateEnum("bundle transaction status", v, BundleTransactionPrepared, BundleTransactionStaging, BundleTransactionActivating, BundleTransactionCommitted, BundleTransactionRollingBack, BundleTransactionRolledBack, BundleTransactionFailed)
+}
+func (v BundleStepStatus) Validate() error {
+	return validateEnum("bundle step status", v, BundleStepPending, BundleStepStaged, BundleStepActivating, BundleStepActivated, BundleStepHealthy, BundleStepCompensating, BundleStepCompensated, BundleStepFailed)
 }

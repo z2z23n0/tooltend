@@ -1,0 +1,16 @@
+schema = "bundle-recipe-v1"
+id = "0g-hk"
+version = "1"
+name = "0g-hk"
+owner = "delegated"
+confidence = "high"
+description = "0g.hk sharing skill"
+[[artifacts]]
+key = "skill"
+name = "0g-hk Skill"
+kind = "skill"
+driver = "git-skill"
+required = true
+[[artifacts.selectors]]
+field = "name"
+equals = "0g-hk"

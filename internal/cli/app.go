@@ -59,15 +59,16 @@ type App struct {
 	runner     execx.Runner
 	global     globalOptions
 	selfApply  selfupdate.ApplyResult
+	warnings   []v1.Warning
 }
 
-// New builds the complete ToolTend V1 command tree. Constructing it is
+// New builds the complete ToolTend v0.2 command tree. Constructing it is
 // side-effect free: it does not create configuration, state, or data paths.
 func New(options Options) *cobra.Command {
 	a := newApp(options)
 	root := &cobra.Command{
 		Use:           "tooltend",
-		Short:         "Lifecycle manager for coding-agent extensions",
+		Short:         "Bundle lifecycle manager for coding-agent tooling",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -90,6 +91,10 @@ func New(options Options) *cobra.Command {
 	flags.StringVar(&a.global.StateDir, "state-dir", "", "use an alternate state directory")
 	flags.BoolVar(&a.global.NoColor, "no-color", false, "disable colored human output")
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		a.warnings = nil
+		if legacyCommand(commandName(cmd)) {
+			a.warnings = append(a.warnings, v1.Warning{Code: "deprecated_component_api", Message: "this component-level command is deprecated; use tooltend bundles instead"})
+		}
 		if a.global.DryRun {
 			return nil
 		}
@@ -108,6 +113,9 @@ func New(options Options) *cobra.Command {
 			}
 			return a.writeFailure(commandName(cmd), err)
 		}
+		if a.selfApply.Applied {
+			a.warnings = append(a.warnings, a.repairAfterSelfUpdate(cmd.Context(), paths)...)
+		}
 		return nil
 	}
 
@@ -115,6 +123,7 @@ func New(options Options) *cobra.Command {
 		a.newInitCommand(),
 		a.newScanCommand(),
 		a.newStatusCommand(),
+		a.newBundlesCommand(),
 		a.newComponentsCommand(),
 		a.newPolicyCommand(),
 		a.newUpdateCommand(),
@@ -295,7 +304,7 @@ func (a *App) run(command string, action func(context.Context) (any, error)) fun
 
 func (a *App) writeSuccess(command string, data any) error {
 	if a.global.JSON {
-		var warnings []v1.Warning
+		warnings := append([]v1.Warning(nil), a.warnings...)
 		if a.selfApply.Applied {
 			warnings = append(warnings, v1.Warning{
 				Code: "self_update_applied", Message: "a previously confirmed ToolTend self-update was applied before this command",
@@ -304,10 +313,25 @@ func (a *App) writeSuccess(command string, data any) error {
 		}
 		return v1.Write(a.out, v1.Success(command, data, warnings...))
 	}
+	for _, warning := range a.warnings {
+		_, _ = fmt.Fprintf(a.errOut, "Warning: %s\n", warning.Message)
+	}
 	if a.selfApply.Applied {
 		_, _ = fmt.Fprintf(a.out, "ToolTend self-update %s was applied before this command.\n", a.selfApply.Version)
 	}
 	return writeHuman(a.out, data)
+}
+
+func legacyCommand(name string) bool {
+	if strings.HasPrefix(name, "components ") || strings.HasPrefix(name, "policy ") {
+		return true
+	}
+	switch name {
+	case "update", "adopt", "rollback", "history", "review":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) writeFailure(command string, err error) error {

@@ -19,7 +19,7 @@ import (
 func (a *App) selfUpdateManager(stateDir, manifestURL string) selfupdate.Manager {
 	return selfupdate.Manager{
 		StateDir: stateDir, Executable: a.executable, ManifestURL: manifestURL,
-		CurrentVersion: buildinfo.Version,
+		CurrentVersion: buildinfo.Version, CurrentSequence: buildinfo.ReleaseSequence(),
 	}
 }
 
@@ -35,7 +35,7 @@ func (a *App) newSelfCommand() *cobra.Command {
 		if err != nil {
 			return nil, err
 		}
-		result := map[string]any{"build": buildinfo.Current(), "update": value}
+		result := map[string]any{"build": buildinfo.Current(), "update": value, "signature": selfupdate.EmbeddedSignatureCapability()}
 		if a.selfApply.Applied {
 			result["applied_before_command"] = a.selfApply
 		}
