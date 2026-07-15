@@ -28,10 +28,54 @@ func (r *transactionRunner) Run(_ context.Context, name string, args ...string) 
 	switch name {
 	case "resolver":
 		return execx.Result{Stdout: []byte("2.0.0\n")}, nil
+	case "git-resolver":
+		return execx.Result{Stdout: []byte("git:0123456789abcdef0123456789abcdef01234567\n")}, nil
 	case "activate-two":
 		return execx.Result{}, errors.New("activation failed")
 	default:
 		return execx.Result{}, nil
+	}
+}
+
+func TestArtifactVersionComparisonAndRollbackOrder(t *testing.T) {
+	if !exactArtifactVersion("git:0123456789abcdef0123456789abcdef01234567") {
+		t.Fatal("exact git commit was rejected")
+	}
+	if exactArtifactVersion("git:main") {
+		t.Fatal("symbolic git ref was accepted")
+	}
+	if compareArtifactVersions("1.2.3", "1.2.4") >= 0 {
+		t.Fatal("semantic downgrade was not detected")
+	}
+	if !artifactVersionMapsEqual(map[string]string{"cli": "1.2.3"}, map[string]string{"cli": "1.2.3"}) {
+		t.Fatal("equivalent observed and resolved manifests were treated as an update")
+	}
+	steps := []executionStep{
+		{artifact: model.BundleArtifact{Kind: model.ArtifactCLI}},
+		{artifact: model.BundleArtifact{Kind: model.ArtifactSkill}},
+		{artifact: model.BundleArtifact{Kind: model.ArtifactHook}},
+	}
+	order := explicitRollbackOrder(steps)
+	if len(order) != 3 || order[0] != 1 || order[1] != 0 || order[2] != 2 {
+		t.Fatalf("rollback order = %v", order)
+	}
+}
+
+func TestSelectedBuiltinRecipesAreAutoCapable(t *testing.T) {
+	catalog, err := LoadCatalog("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"sherlog", "mainline", "agent-capsule", "0g-hk", "anysearch", "codex-conductor", "shuorenhua", "xsearch"} {
+		recipe, ok := catalog.Get(id)
+		if !ok {
+			t.Fatalf("recipe %s is missing", id)
+		}
+		for _, artifact := range recipe.Artifacts {
+			if len(artifact.ResolveArgv) == 0 || len(artifact.StageArgv) == 0 || len(artifact.ActivateArgv) == 0 || len(artifact.RollbackArgv) == 0 || len(artifact.HealthArgv) == 0 {
+				t.Fatalf("recipe %s artifact %s is not auto capable", id, artifact.Key)
+			}
+		}
 	}
 }
 

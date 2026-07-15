@@ -350,6 +350,9 @@ func (a *App) reconcileOnce(ctx context.Context, paths config.Paths, reason stri
 			if prepareErr != nil {
 				return prepareErr
 			}
+			if !preview.UpdateAvailable {
+				return nil
+			}
 			if !activate {
 				return database.UpsertBundleRelease(bundleCtx, preview.Target)
 			}

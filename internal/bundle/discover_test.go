@@ -88,6 +88,39 @@ func TestDiscoverDeduplicatesPhysicalInstallAndReadsPackageMetadata(t *testing.T
 	}
 }
 
+func TestDiscoverMainlineHooksUsesSelectedRepositories(t *testing.T) {
+	database, err := store.OpenRW(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	selected := t.TempDir()
+	ignored := t.TempDir()
+	for _, root := range []string{selected, ignored} {
+		if err := os.MkdirAll(filepath.Join(root, ".mainline"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".mainline", "config.toml"), []byte("[hooks]\nenabled=true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	if err := database.UpsertProject(ctx, model.Project{ID: "selected", RootPath: selected, RootFingerprint: "selected", Selected: true, DiscoveredVia: "test", LastSeenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertProject(ctx, model.Project{ID: "ignored", RootPath: ignored, RootFingerprint: "ignored", Selected: false, DiscoveredVia: "test", LastSeenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	matches, err := discoverMainlineHooks(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].path != selected || matches[0].packageIdentity != "mainline-hooks" {
+		t.Fatalf("matches = %#v", matches)
+	}
+}
+
 func TestDiscoverPrunesStaleProbeWhenBindingProvidesRicherEvidence(t *testing.T) {
 	database, err := store.OpenRW(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

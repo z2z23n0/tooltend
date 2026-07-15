@@ -7,6 +7,9 @@ import (
 	"sort"
 	"strconv"
 	"testing"
+	"time"
+
+	"github.com/z2z23n0/tooltend/internal/model"
 )
 
 func TestSchemaV6MigratesV4WithBackup(t *testing.T) {
@@ -58,5 +61,37 @@ func TestSchemaV6MigratesV4WithBackup(t *testing.T) {
 	backups, err := filepath.Glob(path + ".backup-v4-*")
 	if err != nil || len(backups) != 1 {
 		t.Fatalf("migration backups = %v err=%v", backups, err)
+	}
+}
+
+func TestConfigureBundleMarksPhysicalInstallationsManaged(t *testing.T) {
+	database, err := OpenRW(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	bundle := model.Bundle{ID: "bundle", Slug: "bundle", Name: "Bundle", RecipeID: "bundle", RecipeVersion: "1", RecipeSource: "builtin", Owner: model.LifecycleDelegated, ConfigState: model.BundleUnconfigured, Confidence: model.BundleConfidenceHigh, DiscoveredAt: now, LastSeenAt: now}
+	if err := database.UpsertBundle(ctx, bundle); err != nil {
+		t.Fatal(err)
+	}
+	installation := model.Installation{ID: "installation", BundleID: bundle.ID, Driver: "git-skill", Path: "/tmp/skill", Owner: model.LifecycleDelegated, LastSeenAt: now}
+	if err := database.UpsertInstallation(ctx, installation); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ConfigureBundle(ctx, model.BundlePolicy{BundleID: bundle.ID, Mode: model.BundlePolicyAuto, RecipeTrusted: true, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	installations, err := database.ListInstallations(ctx, bundle.ID)
+	if err != nil || len(installations) != 1 || !installations[0].Managed {
+		t.Fatalf("installations = %#v, err = %v", installations, err)
+	}
+	if err := database.ConfigureBundle(ctx, model.BundlePolicy{BundleID: bundle.ID, Mode: model.BundlePolicyObserve, RecipeTrusted: true, UpdatedAt: now.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	installations, err = database.ListInstallations(ctx, bundle.ID)
+	if err != nil || installations[0].Managed {
+		t.Fatalf("observed installations = %#v, err = %v", installations, err)
 	}
 }
