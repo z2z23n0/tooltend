@@ -849,7 +849,13 @@ func restoreSkillLock(path, stage string) error {
 	return copyPath(filepath.Join(stage, "skill-lock.previous"), lock, false)
 }
 
-var mainlineHookFiles = []string{".claude/settings.json", ".codex/config.toml", ".codex/hooks.json", ".cursor/hooks.json"}
+var mainlineHookFiles = []string{
+	".claude/settings.json",
+	".codex/config.toml",
+	".codex/hooks.json",
+	".cursor/hooks.json",
+	".pi/extensions/mainline.ts",
+}
 
 func stageMainlineHooks(project, stage string) error {
 	if !filepath.IsAbs(project) {

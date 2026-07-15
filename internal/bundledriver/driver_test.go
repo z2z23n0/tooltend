@@ -123,6 +123,10 @@ func TestMainlineHookBackupRestoresRemovedAndExistingFiles(t *testing.T) {
 	if err := safeio.AtomicWriteFile(created, []byte("created"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	createdPi := filepath.Join(project, ".pi", "extensions", "mainline.ts")
+	if err := safeio.AtomicWriteFile(createdPi, []byte("created"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	restored, err := restoreMainlineHooks(project, stage)
 	if err != nil || !restored {
 		t.Fatalf("restored = %t, err = %v", restored, err)
@@ -130,6 +134,9 @@ func TestMainlineHookBackupRestoresRemovedAndExistingFiles(t *testing.T) {
 	assertFileContent(t, existing, "old")
 	if _, err := os.Stat(created); !os.IsNotExist(err) {
 		t.Fatalf("new hook file still exists: %v", err)
+	}
+	if _, err := os.Stat(createdPi); !os.IsNotExist(err) {
+		t.Fatalf("new Pi hook file still exists: %v", err)
 	}
 }
 
