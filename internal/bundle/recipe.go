@@ -45,6 +45,8 @@ type ArtifactRecipe struct {
 	Name         string             `toml:"name" json:"name"`
 	Kind         model.ArtifactKind `toml:"kind" json:"kind"`
 	Driver       string             `toml:"driver" json:"driver"`
+	Source       string             `toml:"source" json:"source,omitempty"`
+	Subdir       string             `toml:"subdir" json:"subdir,omitempty"`
 	Required     bool               `toml:"required" json:"required"`
 	Selectors    []Selector         `toml:"selectors" json:"selectors"`
 	Probes       []string           `toml:"probes" json:"probes,omitempty"`
@@ -183,6 +185,12 @@ func (r Recipe) Validate() error {
 		seen[artifact.Key] = struct{}{}
 		if err := artifact.Kind.Validate(); err != nil {
 			return err
+		}
+		if strings.ContainsAny(artifact.Source+artifact.Subdir, "\x00\r\n") {
+			return fmt.Errorf("artifact %s source contains invalid characters", artifact.Key)
+		}
+		if artifact.Subdir != "" && (filepath.IsAbs(artifact.Subdir) || strings.HasPrefix(filepath.Clean(artifact.Subdir), "..")) {
+			return fmt.Errorf("artifact %s source subdirectory must be relative", artifact.Key)
 		}
 		for _, selector := range artifact.Selectors {
 			if err := selector.Validate(); err != nil {

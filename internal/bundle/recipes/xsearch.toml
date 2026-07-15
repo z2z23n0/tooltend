@@ -1,6 +1,6 @@
 schema = "bundle-recipe-v1"
 id = "xsearch"
-version = "1"
+version = "2"
 name = "xsearch"
 owner = "delegated"
 confidence = "high"
@@ -9,7 +9,27 @@ key = "skill"
 name = "xsearch Skill"
 kind = "skill"
 driver = "git-skill"
+source = "https://github.com/catoncat/xsearch.git"
+subdir = "."
 required = true
+resolve_argv = ["tooltend", "__bundle-driver", "git-resolve", "https://github.com/catoncat/xsearch.git"]
+stage_argv = ["tooltend", "__bundle-driver", "git-stage", "https://github.com/catoncat/xsearch.git", ".", "${version}", "${previous_version}", "${stage}", "${path}"]
+activate_argv = ["tooltend", "__bundle-driver", "git-activate", "${stage}", "${path}"]
+rollback_argv = ["tooltend", "__bundle-driver", "git-rollback", "https://github.com/catoncat/xsearch.git", ".", "${rollback_version}", "${stage}", "${path}"]
+health_argv = ["tooltend", "__bundle-driver", "skill-health", "${path}"]
 [[artifacts.selectors]]
 field = "name"
 equals = "xsearch"
+
+[[artifacts]]
+key = "binary"
+name = "xsearch embedded binary"
+kind = "embedded_binary"
+driver = "github-release"
+required = true
+probes = ["path:~/.agents/skills/xsearch/bin/xsearch"]
+resolve_argv = ["tooltend", "__bundle-driver", "github-resolve", "catoncat/xsearch"]
+stage_argv = ["tooltend", "__bundle-driver", "github-stage", "catoncat/xsearch", "xsearch", "${version}", "${previous_version}", "${stage}", "${path}"]
+activate_argv = ["tooltend", "__bundle-driver", "github-activate", "${stage}", "${path}"]
+rollback_argv = ["tooltend", "__bundle-driver", "github-rollback", "catoncat/xsearch", "xsearch", "${rollback_version}", "${stage}", "${path}"]
+health_argv = ["tooltend", "__bundle-driver", "binary-health", "${path}", "--version"]

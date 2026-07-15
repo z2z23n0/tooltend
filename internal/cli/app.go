@@ -92,6 +92,9 @@ func New(options Options) *cobra.Command {
 	flags.BoolVar(&a.global.NoColor, "no-color", false, "disable colored human output")
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
 		a.warnings = nil
+		if cmd.Annotations[internalDriverAnnotation] == "true" {
+			return nil
+		}
 		if legacyCommand(commandName(cmd)) {
 			a.warnings = append(a.warnings, v1.Warning{Code: "deprecated_component_api", Message: "this component-level command is deprecated; use tooltend bundles instead"})
 		}
@@ -138,6 +141,7 @@ func New(options Options) *cobra.Command {
 		a.newKickCommand(),
 		a.newReconcileCommand(),
 		a.newVersionCommand(),
+		a.newBundleDriverCommand(),
 	)
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return a.writeFailure(commandName(cmd), cliError("invalid_argument", err.Error(), err))

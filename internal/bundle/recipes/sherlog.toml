@@ -1,6 +1,6 @@
 schema = "bundle-recipe-v1"
 id = "sherlog"
-version = "1"
+version = "2"
 name = "Sherlog"
 owner = "delegated"
 confidence = "high"
@@ -13,7 +13,11 @@ kind = "cli"
 driver = "npm"
 required = true
 probes = ["command:sherlog", "command:shlog"]
-health_argv = ["sherlog", "--version"]
+resolve_argv = ["tooltend", "__bundle-driver", "npm-resolve", "@act0r/sherlog"]
+stage_argv = ["tooltend", "__bundle-driver", "npm-stage", "@act0r/sherlog", "${version}", "${previous_version}", "${stage}", "${path}"]
+activate_argv = ["tooltend", "__bundle-driver", "npm-activate", "${stage}"]
+rollback_argv = ["tooltend", "__bundle-driver", "npm-rollback", "@act0r/sherlog", "${rollback_version}", "${stage}"]
+health_argv = ["shlog", "--version"]
 [[artifacts.selectors]]
 field = "name"
 equals = "sherlog|shlog"
@@ -26,7 +30,14 @@ key = "skill"
 name = "Sherlog Skill"
 kind = "skill"
 driver = "npx-skills"
+source = "https://github.com/catoncat/sherlog.git"
+subdir = "skill-packages/sherlog"
 required = true
+resolve_argv = ["tooltend", "__bundle-driver", "git-npm-release-resolve", "https://github.com/catoncat/sherlog.git", "@act0r/sherlog"]
+stage_argv = ["tooltend", "__bundle-driver", "git-stage", "https://github.com/catoncat/sherlog.git", "skill-packages/sherlog", "${version}", "${previous_version}", "${stage}", "${path}"]
+activate_argv = ["tooltend", "__bundle-driver", "git-activate", "${stage}", "${path}"]
+rollback_argv = ["tooltend", "__bundle-driver", "git-rollback", "https://github.com/catoncat/sherlog.git", "skill-packages/sherlog", "${rollback_version}", "${stage}", "${path}"]
+health_argv = ["tooltend", "__bundle-driver", "skill-health", "${path}"]
 [[artifacts.selectors]]
 field = "name"
 equals = "sherlog"

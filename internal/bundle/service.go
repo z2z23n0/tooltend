@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	semver "github.com/Masterminds/semver/v3"
+
 	"github.com/z2z23n0/tooltend/internal/config"
 	"github.com/z2z23n0/tooltend/internal/execx"
 	"github.com/z2z23n0/tooltend/internal/model"
@@ -26,19 +28,21 @@ type Service struct {
 }
 
 type UpdatePreview struct {
-	Bundle       model.Bundle            `json:"bundle"`
-	Policy       model.BundlePolicy      `json:"policy"`
-	Current      *model.BundleRelease    `json:"current_release,omitempty"`
-	Target       model.BundleRelease     `json:"target_release"`
-	Artifacts    []UpdateArtifactPreview `json:"artifacts"`
-	StageOnly    bool                    `json:"stage_only"`
-	AutoEligible bool                    `json:"auto_eligible"`
+	Bundle          model.Bundle            `json:"bundle"`
+	Policy          model.BundlePolicy      `json:"policy"`
+	Current         *model.BundleRelease    `json:"current_release,omitempty"`
+	Target          model.BundleRelease     `json:"target_release"`
+	Artifacts       []UpdateArtifactPreview `json:"artifacts"`
+	StageOnly       bool                    `json:"stage_only"`
+	AutoEligible    bool                    `json:"auto_eligible"`
+	UpdateAvailable bool                    `json:"update_available"`
 }
 
 type UpdateArtifactPreview struct {
 	Artifact        model.BundleArtifact `json:"artifact"`
 	Installations   int                  `json:"installations"`
 	ResolvedVersion string               `json:"resolved_version,omitempty"`
+	Changed         bool                 `json:"changed"`
 	CanStage        bool                 `json:"can_stage"`
 	CanActivate     bool                 `json:"can_activate"`
 	CanRollback     bool                 `json:"can_rollback"`
@@ -108,6 +112,13 @@ func (s Service) PrepareUpdate(ctx context.Context, bundleID string, stageOnly b
 			preview.Current = &current
 		}
 	}
+	currentVersions := map[string]string{}
+	if preview.Current != nil {
+		currentVersions, err = parseReleaseVersions(preview.Current.ManifestJSON)
+		if err != nil {
+			return UpdatePreview{}, fmt.Errorf("current bundle release manifest: %w", err)
+		}
+	}
 	versions := map[string]string{}
 	for _, artifact := range artifacts {
 		recipe, err := decodeArtifactMetadata(artifact)
@@ -133,7 +144,12 @@ func (s Service) PrepareUpdate(ctx context.Context, bundleID string, stageOnly b
 		if err != nil {
 			return UpdatePreview{}, fmt.Errorf("resolve artifact %s: %w", artifact.Name, err)
 		}
+		currentVersion := currentVersions[artifact.RecipeKey]
+		if compareArtifactVersions(resolved, currentVersion) < 0 {
+			resolved = currentVersion
+		}
 		item.ResolvedVersion = resolved
+		item.Changed = resolved != currentVersion
 		versions[artifact.RecipeKey] = resolved
 		if !item.CanStage || !item.CanActivate || !item.CanRollback || !item.CanHealthCheck {
 			preview.AutoEligible = false
@@ -158,12 +174,16 @@ func (s Service) PrepareUpdate(ctx context.Context, bundleID string, stageOnly b
 		ID: stableID("rel", bundleValue.ID+"\x00"+string(manifest)), BundleID: bundleValue.ID, Version: releaseVersion,
 		ResolvedRef: releaseVersion, ManifestJSON: string(manifest), Status: "resolved", CreatedAt: s.now(),
 	}
+	preview.UpdateAvailable = preview.Current == nil || !artifactVersionMapsEqual(currentVersions, versions)
 	return preview, nil
 }
 
 func (s Service) ExecuteUpdate(ctx context.Context, preview UpdatePreview) (result UpdateResult, err error) {
 	if err := s.validate(); err != nil {
 		return result, err
+	}
+	if !preview.UpdateAvailable {
+		return result, errors.New("bundle is already at the resolved release")
 	}
 	currentBundle, err := s.Database.GetBundle(ctx, preview.Bundle.ID)
 	if err != nil {
@@ -216,6 +236,10 @@ func (s Service) ExecuteUpdate(ctx context.Context, preview UpdatePreview) (resu
 		byArtifact[installation.ArtifactID] = append(byArtifact[installation.ArtifactID], installation)
 	}
 	versions := releaseVersions(preview.Target.ManifestJSON)
+	currentVersions := map[string]string{}
+	if preview.Current != nil {
+		currentVersions = releaseVersions(preview.Current.ManifestJSON)
+	}
 	steps := []executionStep{}
 	ordinal := 0
 	for _, artifact := range artifacts {
@@ -225,6 +249,9 @@ func (s Service) ExecuteUpdate(ctx context.Context, preview UpdatePreview) (resu
 		}
 		for _, installation := range byArtifact[artifact.ID] {
 			if len(recipe.StageArgv) == 0 && len(recipe.ActivateArgv) == 0 {
+				continue
+			}
+			if versions[artifact.RecipeKey] == currentVersions[artifact.RecipeKey] {
 				continue
 			}
 			stepID := stableID("bst", transactionID+fmt.Sprintf("\x00%d", ordinal))
@@ -410,7 +437,7 @@ func (s Service) PrepareRollback(ctx context.Context, bundleID, targetReleaseID 
 			continue
 		}
 		version := targetVersions[artifact.RecipeKey]
-		if count > 0 && !exactVersion(version) {
+		if count > 0 && !exactArtifactVersion(version) {
 			return RollbackPreview{}, fmt.Errorf("rollback target has no exact version for artifact %s", artifact.Name)
 		}
 		recipe, err := decodeArtifactMetadata(artifact)
@@ -501,7 +528,7 @@ func (s Service) ExecuteRollback(ctx context.Context, preview RollbackPreview) (
 	}
 	transaction.Status = model.BundleTransactionRollingBack
 	completedSteps := make([]executionStep, 0, len(steps))
-	for index := len(steps) - 1; index >= 0; index-- {
+	for _, index := range explicitRollbackOrder(steps) {
 		step := steps[index]
 		if err := s.Database.UpdateBundleTransactionStep(ctx, step.record.ID, model.BundleStepCompensating, "", "", "{}", nil); err != nil {
 			return result, s.failTransaction(ctx, transaction, "journal_failed", err)
@@ -551,14 +578,15 @@ func (s Service) ExecuteRollback(ctx context.Context, preview RollbackPreview) (
 
 func (s Service) restoreAfterRollbackFailure(ctx context.Context, completed []executionStep, versions map[string]string) error {
 	var failures []error
-	for index := len(completed) - 1; index >= 0; index-- {
+	for _, index := range explicitRollbackOrder(completed) {
 		step := completed[index]
-		step.version = versions[step.artifact.RecipeKey]
-		if !exactVersion(step.version) {
+		step.rollbackVersion = versions[step.artifact.RecipeKey]
+		step.version = step.rollbackVersion
+		if !exactArtifactVersion(step.rollbackVersion) {
 			failures = append(failures, fmt.Errorf("artifact %s has no exact restore version", step.artifact.Name))
 			continue
 		}
-		if err := s.runCommand(context.WithoutCancel(ctx), step.recipe.ActivateArgv, step, DefaultInstallTimeout); err != nil {
+		if err := s.runCommand(context.WithoutCancel(ctx), step.recipe.RollbackArgv, step, DefaultInstallTimeout); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -585,8 +613,11 @@ func (s Service) runResolver(ctx context.Context, argv []string, installation mo
 	if index := strings.IndexByte(version, '\n'); index >= 0 {
 		version = strings.TrimSpace(version[:index])
 	}
-	if !exactVersion(version) {
-		return "", errors.New("resolver did not return an exact semantic version")
+	if !exactArtifactVersion(version) {
+		return "", errors.New("resolver did not return an exact semantic version or git commit")
+	}
+	if strings.HasPrefix(version, "git:") {
+		return strings.ToLower(version), nil
 	}
 	return strings.TrimPrefix(version, "v"), nil
 }
@@ -782,4 +813,67 @@ func bundleReleaseVersion(versions map[string]string, manifest []byte) string {
 		}
 	}
 	return "bundle-" + strings.TrimPrefix(stableID("", string(manifest)), "_")[:12]
+}
+
+func exactArtifactVersion(value string) bool {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "git:") {
+		commit := strings.TrimPrefix(value, "git:")
+		if len(commit) != 40 {
+			return false
+		}
+		for _, character := range commit {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", character) {
+				return false
+			}
+		}
+		return true
+	}
+	return exactVersion(value)
+}
+
+func compareArtifactVersions(candidate, current string) int {
+	candidate, current = strings.TrimSpace(candidate), strings.TrimSpace(current)
+	if current == "" {
+		return 1
+	}
+	if candidate == current {
+		return 0
+	}
+	if strings.HasPrefix(candidate, "git:") || strings.HasPrefix(current, "git:") {
+		return 1
+	}
+	candidateVersion, candidateErr := semver.NewVersion(strings.TrimPrefix(candidate, "v"))
+	currentVersion, currentErr := semver.NewVersion(strings.TrimPrefix(current, "v"))
+	if candidateErr != nil || currentErr != nil {
+		return 1
+	}
+	return candidateVersion.Compare(currentVersion)
+}
+
+func artifactVersionMapsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func explicitRollbackOrder(steps []executionStep) []int {
+	order := make([]int, 0, len(steps))
+	for index := len(steps) - 1; index >= 0; index-- {
+		if steps[index].artifact.Kind != model.ArtifactHook {
+			order = append(order, index)
+		}
+	}
+	for index := len(steps) - 1; index >= 0; index-- {
+		if steps[index].artifact.Kind == model.ArtifactHook {
+			order = append(order, index)
+		}
+	}
+	return order
 }
