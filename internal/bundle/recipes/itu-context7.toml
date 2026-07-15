@@ -1,0 +1,28 @@
+schema = "bundle-recipe-v1"
+id = "itu-context7"
+version = "1"
+name = "ITU Context7"
+owner = "delegated"
+confidence = "high"
+description = "ITU Context7 npm CLI and agent skills"
+
+[[artifacts]]
+key = "cli"
+name = "ITU Context7 CLI"
+kind = "cli"
+driver = "npm"
+required = true
+probes = ["command:itu-ctx7"]
+[[artifacts.selectors]]
+field = "package"
+equals = "@middleware-ai/itu-context7-cli"
+
+[[artifacts]]
+key = "skill"
+name = "ITU Context7 Skill"
+kind = "skill"
+driver = "mtskills"
+required = true
+[[artifacts.selectors]]
+field = "name"
+equals = "itu-context7"

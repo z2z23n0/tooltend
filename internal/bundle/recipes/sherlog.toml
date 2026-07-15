@@ -1,0 +1,32 @@
+schema = "bundle-recipe-v1"
+id = "sherlog"
+version = "1"
+name = "Sherlog"
+owner = "delegated"
+confidence = "high"
+description = "Sherlog npm CLI and shared skill"
+
+[[artifacts]]
+key = "cli"
+name = "Sherlog CLI"
+kind = "cli"
+driver = "npm"
+required = true
+probes = ["command:sherlog", "command:shlog"]
+health_argv = ["sherlog", "--version"]
+[[artifacts.selectors]]
+field = "name"
+equals = "sherlog|shlog"
+
+[[artifacts]]
+key = "skill"
+name = "Sherlog Skill"
+kind = "skill"
+driver = "npx-skills"
+required = true
+[[artifacts.selectors]]
+field = "name"
+equals = "sherlog"
+[[artifacts.selectors]]
+field = "kind"
+equals = "skill"

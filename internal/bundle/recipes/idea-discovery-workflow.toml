@@ -1,0 +1,15 @@
+schema = "bundle-recipe-v1"
+id = "idea-discovery-workflow"
+version = "1"
+name = "Idea Discovery Workflow"
+owner = "workspace-linked"
+confidence = "high"
+[[artifacts]]
+key = "skill"
+name = "Idea Discovery Workflow Skill"
+kind = "skill"
+driver = "workspace-link"
+required = true
+[[artifacts.selectors]]
+field = "name"
+equals = "idea-discovery-workflow"

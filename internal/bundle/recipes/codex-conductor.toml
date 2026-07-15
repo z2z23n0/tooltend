@@ -1,0 +1,15 @@
+schema = "bundle-recipe-v1"
+id = "codex-conductor"
+version = "1"
+name = "Codex Conductor"
+owner = "delegated"
+confidence = "high"
+[[artifacts]]
+key = "skill"
+name = "Codex Conductor Skill"
+kind = "skill"
+driver = "git-skill"
+required = true
+[[artifacts.selectors]]
+field = "name"
+equals = "codex-conductor"

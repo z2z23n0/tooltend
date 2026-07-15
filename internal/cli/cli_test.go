@@ -29,6 +29,7 @@ func TestCommandTreeContainsCompleteV1Surface(t *testing.T) {
 	command := New(testOptions(t, &bytes.Buffer{}, &bytes.Buffer{}, strings.NewReader("")))
 	for _, path := range []string{
 		"init", "scan", "status", "components list", "components show", "policy set",
+		"bundles list", "bundles show", "bundles configure", "bundles update", "bundles rollback", "bundles history", "bundles doctor",
 		"update", "review", "history", "rollback", "adopt", "project init", "project export",
 		"project sync", "self status", "self update", "doctor", "hook", "kick", "reconcile", "version",
 	} {
@@ -40,6 +41,211 @@ func TestCommandTreeContainsCompleteV1Surface(t *testing.T) {
 		if command.PersistentFlags().Lookup(flag) == nil {
 			t.Fatalf("missing global flag --%s", flag)
 		}
+	}
+}
+
+func TestInitDiscoversUnconfiguredBundlesWithoutSchedulingLegacyTasks(t *testing.T) {
+	var out, stderr bytes.Buffer
+	options := testOptions(t, &out, &stderr, strings.NewReader(""))
+	options.Runner = &successfulRunner{}
+	command := New(options)
+	command.SetArgs([]string{"init", "--yes", "--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("init: %v\nstdout=%s\nstderr=%s", err, out.String(), stderr.String())
+	}
+	paths := config.ResolveWith(options.HomeDir, options.Getenv)
+	database, err := store.OpenReadOnly(paths.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	counts, err := database.BundleCounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Total == 0 || counts.Configured != 0 || counts.Managed != 0 || counts.Unconfigured != counts.Total {
+		t.Fatalf("bundle counts = %+v", counts)
+	}
+	legacy, err := database.CountTasks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Pending+legacy.Running != 0 {
+		t.Fatalf("legacy tasks were scheduled: %+v", legacy)
+	}
+	var bundleTasks int
+	if err := database.DB().QueryRow(`SELECT COUNT(*) FROM bundle_tasks`).Scan(&bundleTasks); err != nil || bundleTasks != 0 {
+		t.Fatalf("bundle tasks=%d err=%v", bundleTasks, err)
+	}
+}
+
+func TestResetStateDryRunIsReadOnlyAndConfirmedResetBacksUp(t *testing.T) {
+	var out, stderr bytes.Buffer
+	options := testOptions(t, &out, &stderr, strings.NewReader(""))
+	options.Runner = &successfulRunner{}
+	command := New(options)
+	command.SetArgs([]string{"init", "--yes", "--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	paths := config.ResolveWith(options.HomeDir, options.Getenv)
+	marker := filepath.Join(paths.ObjectsDir, "keep-until-confirmed")
+	if err := os.WriteFile(marker, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backupParent := filepath.Join(filepath.Dir(paths.StateDir), "tooltend-backups")
+	out.Reset()
+	command = New(options)
+	command.SetArgs([]string{"init", "--reset-state", "--dry-run", "--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("reset dry-run: %v\n%s", err, out.String())
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("dry-run changed old state: %v", err)
+	}
+	if _, err := os.Stat(backupParent); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry-run created backup directory: %v", err)
+	}
+	out.Reset()
+	command = New(options)
+	command.SetArgs([]string{"init", "--reset-state", "--yes", "--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("reset: %v\nstdout=%s\nstderr=%s", err, out.String(), stderr.String())
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmed reset retained old marker: %v", err)
+	}
+	backups, err := filepath.Glob(filepath.Join(backupParent, "*", "manifest.json"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("backups=%v err=%v", backups, err)
+	}
+	database, err := store.OpenReadOnly(paths.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	counts, err := database.BundleCounts(context.Background())
+	if err != nil || counts.Total == 0 || counts.Configured != 0 || counts.Managed != 0 {
+		t.Fatalf("post-reset counts=%+v err=%v", counts, err)
+	}
+}
+
+func TestResetStateRestoresOldStateWhenSchedulerReactivationFails(t *testing.T) {
+	var out, stderr bytes.Buffer
+	runner := &successfulRunner{}
+	options := testOptions(t, &out, &stderr, strings.NewReader(""))
+	options.Runner = runner
+	command := New(options)
+	command.SetArgs([]string{"init", "--yes", "--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	paths := config.ResolveWith(options.HomeDir, options.Getenv)
+	marker := filepath.Join(paths.ObjectsDir, "restore-me")
+	if err := os.WriteFile(marker, []byte("old-state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configHash := fileHashOrEmpty(paths.ConfigFile)
+	databaseHash := fileHashOrEmpty(paths.DatabaseFile)
+	runner.failAt = runner.calls + 3 // deactivate and best-effort bootout succeed; final registration fails once
+	out.Reset()
+	command = New(options)
+	command.SetArgs([]string{"init", "--reset-state", "--yes", "--json"})
+	if err := command.Execute(); err == nil || !IsReported(err) {
+		t.Fatalf("reset unexpectedly succeeded: %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != "old-state" {
+		t.Fatalf("old data was not restored: data=%q err=%v", data, err)
+	}
+	if fileHashOrEmpty(paths.ConfigFile) != configHash || fileHashOrEmpty(paths.DatabaseFile) != databaseHash {
+		t.Fatal("old configuration or database was not restored byte-for-byte")
+	}
+}
+
+func TestResetStateRefusesConfiguredManagedBundle(t *testing.T) {
+	var out, stderr bytes.Buffer
+	options := testOptions(t, &out, &stderr, strings.NewReader(""))
+	options.Runner = &successfulRunner{}
+	command := New(options)
+	command.SetArgs([]string{"init", "--yes", "--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	paths := config.ResolveWith(options.HomeDir, options.Getenv)
+	database, err := store.OpenRW(paths.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundles, err := database.ListBundles(context.Background())
+	if err != nil || len(bundles) == 0 {
+		t.Fatalf("bundles=%v err=%v", bundles, err)
+	}
+	if err := database.ConfigureBundle(context.Background(), model.BundlePolicy{BundleID: bundles[0].ID, Mode: model.BundlePolicyManual, RecipeTrusted: true, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	command = New(options)
+	command.SetArgs([]string{"init", "--reset-state", "--dry-run", "--json"})
+	err = command.Execute()
+	if err == nil || !IsReported(err) {
+		t.Fatalf("configured bundle reset unexpectedly succeeded: %v", err)
+	}
+	var envelope v1.Envelope
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != "reset_refused" {
+		t.Fatalf("unexpected reset error: %+v", envelope.Error)
+	}
+}
+
+func TestBundleConfigureLeavesSkippedBundlesUnconfiguredAndRejectsUnsafeAuto(t *testing.T) {
+	var out, stderr bytes.Buffer
+	options := testOptions(t, &out, &stderr, strings.NewReader("\n"))
+	options.Runner = &successfulRunner{}
+	command := New(options)
+	command.SetArgs([]string{"init", "--yes", "--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	command = New(options)
+	command.SetArgs([]string{"bundles", "configure", "--yes"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("skip configure: %v", err)
+	}
+	paths := config.ResolveWith(options.HomeDir, options.Getenv)
+	database, err := store.OpenReadOnly(paths.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts, err := database.BundleCounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Configured != 0 || counts.Managed != 0 {
+		t.Fatalf("skipped bundles were configured: %+v", counts)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	command = New(options)
+	command.SetArgs([]string{"bundles", "configure", "--set", "tooltend=auto", "--yes", "--json"})
+	err = command.Execute()
+	if err == nil || !IsReported(err) {
+		t.Fatalf("unsafe auto configuration unexpectedly succeeded: %v", err)
+	}
+	var envelope v1.Envelope
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != "unsafe_policy" {
+		t.Fatalf("unexpected configure error: %+v", envelope.Error)
 	}
 }
 
@@ -111,10 +317,16 @@ func TestComponentsListSeparatesActionableManagedAndCompleteInventory(t *testing
 	}
 }
 
-type successfulRunner struct{ calls int }
+type successfulRunner struct {
+	calls  int
+	failAt int
+}
 
 func (r *successfulRunner) Run(context.Context, string, ...string) (execx.Result, error) {
 	r.calls++
+	if r.failAt > 0 && r.calls == r.failAt {
+		return execx.Result{}, errors.New("injected runner failure")
+	}
 	return execx.Result{}, nil
 }
 

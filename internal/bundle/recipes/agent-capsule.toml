@@ -1,0 +1,29 @@
+schema = "bundle-recipe-v1"
+id = "agent-capsule"
+version = "1"
+name = "Agent Capsule"
+owner = "delegated"
+confidence = "high"
+description = "Agent Capsule release binary and agent skill"
+
+[[artifacts]]
+key = "cli"
+name = "Agent Capsule CLI"
+kind = "cli"
+driver = "github-release"
+required = true
+probes = ["command:capsule"]
+health_argv = ["capsule", "version"]
+[[artifacts.selectors]]
+field = "name"
+equals = "capsule"
+
+[[artifacts]]
+key = "skill"
+name = "Agent Capsule Skill"
+kind = "skill"
+driver = "git-skill"
+required = true
+[[artifacts.selectors]]
+field = "name"
+equals = "agent-capsule"

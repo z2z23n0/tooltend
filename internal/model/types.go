@@ -172,13 +172,161 @@ type UpdateCandidate struct {
 	UpdatedAt        time.Time       `json:"updated_at"`
 }
 
-type ReviewBundle struct {
+type ReviewPacket struct {
 	ID            string    `json:"id"`
 	CandidateID   string    `json:"candidate_id"`
 	CandidateHash string    `json:"candidate_hash"`
 	ObjectHash    string    `json:"object_hash"`
 	RiskTypesJSON string    `json:"risk_types_json"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// ReviewBundle is kept as a source-compatible alias for the v0.1 component
+// review API. The product-level Bundle model is intentionally separate.
+type ReviewBundle = ReviewPacket
+
+type Bundle struct {
+	ID               string            `json:"id"`
+	Slug             string            `json:"slug"`
+	Name             string            `json:"name"`
+	RecipeID         string            `json:"recipe_id"`
+	RecipeVersion    string            `json:"recipe_version"`
+	RecipeSource     string            `json:"recipe_source"`
+	Owner            LifecycleOwner    `json:"lifecycle_owner"`
+	ConfigState      BundleConfigState `json:"config_state"`
+	Confidence       BundleConfidence  `json:"confidence"`
+	CurrentReleaseID string            `json:"current_release_id,omitempty"`
+	MetadataJSON     string            `json:"metadata_json,omitempty"`
+	DiscoveredAt     time.Time         `json:"discovered_at"`
+	LastSeenAt       time.Time         `json:"last_seen_at"`
+}
+
+type BundleRelease struct {
+	ID           string    `json:"id"`
+	BundleID     string    `json:"bundle_id"`
+	Version      string    `json:"version"`
+	ResolvedRef  string    `json:"resolved_ref,omitempty"`
+	ManifestJSON string    `json:"manifest_json"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type BundleArtifact struct {
+	ID           string       `json:"id"`
+	BundleID     string       `json:"bundle_id"`
+	ReleaseID    string       `json:"release_id,omitempty"`
+	RecipeKey    string       `json:"recipe_key"`
+	Kind         ArtifactKind `json:"kind"`
+	Name         string       `json:"name"`
+	Ordinal      int          `json:"ordinal"`
+	Required     bool         `json:"required"`
+	Driver       string       `json:"driver"`
+	MetadataJSON string       `json:"metadata_json"`
+}
+
+type Installation struct {
+	ID              string         `json:"id"`
+	BundleID        string         `json:"bundle_id"`
+	ArtifactID      string         `json:"artifact_id,omitempty"`
+	Driver          string         `json:"driver"`
+	Path            string         `json:"path"`
+	PackageIdentity string         `json:"package_identity,omitempty"`
+	SourceIdentity  string         `json:"source_identity,omitempty"`
+	ObservedVersion string         `json:"observed_version,omitempty"`
+	ObservedHash    string         `json:"observed_hash,omitempty"`
+	Owner           LifecycleOwner `json:"lifecycle_owner"`
+	Managed         bool           `json:"managed"`
+	MetadataJSON    string         `json:"metadata_json"`
+	LastSeenAt      time.Time      `json:"last_seen_at"`
+}
+
+type ConsumerBinding struct {
+	ID             string    `json:"id"`
+	InstallationID string    `json:"installation_id"`
+	BindingID      string    `json:"binding_id,omitempty"`
+	Host           HostKind  `json:"host"`
+	ProjectID      string    `json:"project_id,omitempty"`
+	Scope          ScopeKind `json:"scope"`
+	ConfigPath     string    `json:"config_path,omitempty"`
+	ConfigPointer  string    `json:"config_pointer,omitempty"`
+	LastSeenAt     time.Time `json:"last_seen_at"`
+}
+
+type BundlePolicy struct {
+	BundleID      string           `json:"bundle_id"`
+	Mode          BundlePolicyMode `json:"mode"`
+	RecipeTrusted bool             `json:"recipe_trusted"`
+	UpdatedAt     time.Time        `json:"updated_at"`
+}
+
+type BundleTransaction struct {
+	ID            string                  `json:"id"`
+	BundleID      string                  `json:"bundle_id"`
+	FromReleaseID string                  `json:"from_release_id,omitempty"`
+	ToReleaseID   string                  `json:"to_release_id,omitempty"`
+	Status        BundleTransactionStatus `json:"status"`
+	StageOnly     bool                    `json:"stage_only"`
+	ErrorCode     string                  `json:"error_code,omitempty"`
+	ErrorSummary  string                  `json:"error_summary,omitempty"`
+	StartedAt     time.Time               `json:"started_at"`
+	UpdatedAt     time.Time               `json:"updated_at"`
+	CompletedAt   *time.Time              `json:"completed_at,omitempty"`
+}
+
+type BundleTransactionStep struct {
+	ID             string           `json:"id"`
+	TransactionID  string           `json:"transaction_id"`
+	Ordinal        int              `json:"ordinal"`
+	ArtifactID     string           `json:"artifact_id,omitempty"`
+	InstallationID string           `json:"installation_id,omitempty"`
+	Kind           string           `json:"kind"`
+	Status         BundleStepStatus `json:"status"`
+	CommandJSON    string           `json:"command_json"`
+	RollbackJSON   string           `json:"rollback_json"`
+	BeforeJSON     string           `json:"before_json"`
+	AfterJSON      string           `json:"after_json"`
+	ErrorCode      string           `json:"error_code,omitempty"`
+	ErrorSummary   string           `json:"error_summary,omitempty"`
+	StartedAt      *time.Time       `json:"started_at,omitempty"`
+	CompletedAt    *time.Time       `json:"completed_at,omitempty"`
+}
+
+type BundleReceipt struct {
+	ID            string    `json:"id"`
+	BundleID      string    `json:"bundle_id"`
+	TransactionID string    `json:"transaction_id,omitempty"`
+	ReleaseID     string    `json:"release_id,omitempty"`
+	Action        string    `json:"action"`
+	Status        string    `json:"status"`
+	SummaryJSON   string    `json:"summary_json"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type BundleHealthCheck struct {
+	ID             string    `json:"id"`
+	BundleID       string    `json:"bundle_id"`
+	ArtifactID     string    `json:"artifact_id,omitempty"`
+	InstallationID string    `json:"installation_id,omitempty"`
+	Name           string    `json:"name"`
+	Status         string    `json:"status"`
+	Summary        string    `json:"summary,omitempty"`
+	CheckedAt      time.Time `json:"checked_at"`
+}
+
+type BundleTask struct {
+	ID             string     `json:"id"`
+	BundleID       string     `json:"bundle_id"`
+	InstallationID string     `json:"installation_id,omitempty"`
+	Kind           string     `json:"kind"`
+	IdempotencyKey string     `json:"idempotency_key"`
+	Status         TaskStatus `json:"status"`
+	Attempts       int        `json:"attempts"`
+	NextAttemptAt  time.Time  `json:"next_attempt_at"`
+	LeaseUntil     *time.Time `json:"lease_until,omitempty"`
+	ErrorCode      string     `json:"error_code,omitempty"`
+	ErrorSummary   string     `json:"error_summary,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 type Review struct {

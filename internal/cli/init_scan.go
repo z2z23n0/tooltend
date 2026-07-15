@@ -12,17 +12,16 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/z2z23n0/tooltend/internal/buildinfo"
+	"github.com/z2z23n0/tooltend/internal/bundle"
 	"github.com/z2z23n0/tooltend/internal/config"
 	"github.com/z2z23n0/tooltend/internal/host"
 	"github.com/z2z23n0/tooltend/internal/inventory"
-	"github.com/z2z23n0/tooltend/internal/kick"
 	"github.com/z2z23n0/tooltend/internal/model"
 	"github.com/z2z23n0/tooltend/internal/plan"
-	"github.com/z2z23n0/tooltend/internal/reconcile"
 	"github.com/z2z23n0/tooltend/internal/safeio"
 	"github.com/z2z23n0/tooltend/internal/scheduler"
 	"github.com/z2z23n0/tooltend/internal/store"
@@ -30,8 +29,9 @@ import (
 )
 
 type initOptions struct {
-	Projects []string
-	Agents   []string
+	Projects   []string
+	Agents     []string
+	ResetState bool
 }
 
 type profileMutation struct {
@@ -65,10 +65,14 @@ func (a *App) newInitCommand() *cobra.Command {
 	}
 	command.Flags().StringSliceVar(&options.Projects, "project", nil, "select a project (repeatable)")
 	command.Flags().StringSliceVar(&options.Agents, "agent", nil, "select codex and/or claude")
+	command.Flags().BoolVar(&options.ResetState, "reset-state", false, "back up and rebuild ToolTend state without configuring bundles")
 	command.RunE = a.run("init", func(ctx context.Context) (any, error) {
 		paths, err := a.paths()
 		if err != nil {
 			return nil, err
+		}
+		if options.ResetState {
+			return a.resetState(ctx, paths, options)
 		}
 		cfg, err := a.loadConfig(paths)
 		if err != nil {
@@ -124,13 +128,11 @@ func (a *App) newInitCommand() *cobra.Command {
 		}
 
 		var persisted inventory.PersistResult
-		var runtimeMigrations int
-		var kickWarning string
+		var bundleInventory bundle.DiscoverResult
 		configBeforeHash := fileHashOrEmpty(paths.ConfigFile)
-		value := plan.Plan{ID: "init-v1", Title: "Initialize ToolTend V1"}
+		value := plan.Plan{ID: "init-v2", Title: "Initialize ToolTend v0.2 bundle inventory"}
 		candidateJSON, _ := json.Marshal(projectCandidates)
 		inventoryPreview := buildInitInventoryPreview(report)
-		eligibleRuntimeMigrations := countInitRuntimeMigrationCandidates(report)
 		inventoryJSON, _ := json.Marshal(inventoryPreview)
 		value.Operations = append(value.Operations, plan.FuncOperation{
 			Description: plan.OperationPreview{
@@ -146,7 +148,7 @@ func (a *App) newInitCommand() *cobra.Command {
 		value.Operations = append(value.Operations, plan.FuncOperation{
 			Description: plan.OperationPreview{
 				ID: "preview-inventory", Kind: plan.OperationOther, Target: "component inventory",
-				Summary:              "Show discovered components, bindings, classifications, duplicate copies, version drift, and recommended apply modes",
+				Summary:              "Show discovery evidence that will be grouped into unconfigured bundles",
 				RequiresConfirmation: true,
 				Details:              map[string]string{"components": string(inventoryJSON)},
 			},
@@ -202,11 +204,7 @@ func (a *App) newInitCommand() *cobra.Command {
 					ID: "initialize-inventory", Kind: plan.OperationDatabase, Target: paths.DatabaseFile,
 					Summary:              "Create or migrate the SQLite state database and persist the read-only discovery result",
 					RequiresConfirmation: true,
-					Details: map[string]string{
-						"observations":                 fmt.Sprint(len(report.HostResult.Observations)),
-						"bindings":                     fmt.Sprint(len(report.HostResult.Bindings)),
-						"runtime_migration_candidates": fmt.Sprint(eligibleRuntimeMigrations),
-					},
+					Details:              map[string]string{"observations": fmt.Sprint(len(report.HostResult.Observations)), "bindings": fmt.Sprint(len(report.HostResult.Bindings)), "bundle_policy": "all discovered bundles remain unconfigured"},
 				},
 				ApplyFunc: func(ctx context.Context) error {
 					database, openErr := store.OpenRW(paths.DatabaseFile)
@@ -218,7 +216,11 @@ func (a *App) newInitCommand() *cobra.Command {
 					if openErr != nil {
 						return openErr
 					}
-					runtimeMigrations, openErr = reconcile.EnqueueRuntimeMigrations(ctx, database, time.Now().UTC())
+					bundleInventory, openErr = bundle.Discover(ctx, database, bundle.DiscoverOptions{
+						HomeDir: a.home, Executable: a.executable, BuildVersion: buildinfo.Version,
+						LocalRecipeDir: filepath.Join(paths.ConfigDir, "bundles.d"),
+						LookupPath: a.lookupPath,
+					})
 					return openErr
 				},
 			},
@@ -279,33 +281,11 @@ func (a *App) newInitCommand() *cobra.Command {
 				},
 			},
 		)
-		value.Operations = append(value.Operations, plan.FuncOperation{
-			Description: plan.OperationPreview{
-				ID: "queue-first-reconcile", Kind: plan.OperationOther, Target: paths.StateDir,
-				Summary:              "Queue a detached one-shot worker for runtime migration and the first update check",
-				RequiresConfirmation: true,
-				Details: map[string]string{
-					"eligible_candidates": fmt.Sprint(eligibleRuntimeMigrations),
-					"queued":              "only after confirmed inventory persistence; the detached worker adopts exact npm/pypi runtimes",
-				},
-			},
-			ApplyFunc: func(context.Context) error {
-				_, queueErr := kick.Queue(a.executable, paths.StateDir, "reconcile", "--once", "--reason", "kick", "--state-dir", paths.StateDir, "--json")
-				if queueErr != nil {
-					kickWarning = "initial worker was not started; SessionStart and the daily schedule will retry"
-				}
-				return nil
-			},
-		})
 		return a.applyPlan(ctx, value, func() any {
 			result := map[string]any{
-				"paths": paths, "inventory": persisted,
-				"project_candidates":        projectCandidates,
-				"runtime_migrations_queued": runtimeMigrations,
-				"warnings":                  report.HostResult.Warnings,
-			}
-			if kickWarning != "" {
-				result["worker_warning"] = kickWarning
+				"paths": paths, "inventory": persisted, "bundles": bundleInventory,
+				"project_candidates": projectCandidates, "warnings": report.HostResult.Warnings,
+				"next_command": "tooltend bundles configure",
 			}
 			return result
 		})
@@ -711,6 +691,7 @@ func (a *App) newScanCommand() *cobra.Command {
 			return nil, err
 		}
 		var persisted inventory.PersistResult
+		var bundleInventory bundle.DiscoverResult
 		value := plan.Plan{ID: "scan-v1", Title: "Persist the current ToolTend inventory", Operations: []plan.Operation{
 			plan.FuncOperation{
 				Description: plan.OperationPreview{
@@ -723,14 +704,39 @@ func (a *App) newScanCommand() *cobra.Command {
 					return withLifecycleStateLock(ctx, paths, func(database *store.Store) error {
 						var persistErr error
 						persisted, persistErr = inventory.Persist(ctx, database, report)
+						if persistErr != nil {
+							return persistErr
+						}
+						bundleInventory, persistErr = bundle.Discover(ctx, database, bundle.DiscoverOptions{
+							HomeDir: a.home, Executable: a.executable, BuildVersion: buildinfo.Version,
+							LocalRecipeDir: filepath.Join(paths.ConfigDir, "bundles.d"),
+							LookupPath: a.lookupPath,
+						})
 						return persistErr
 					})
 				},
 			},
 		}}
 		return a.applyPlan(ctx, value, func() any {
-			return map[string]any{"inventory": persisted, "warnings": report.HostResult.Warnings}
+			return map[string]any{"inventory": persisted, "bundles": bundleInventory, "warnings": report.HostResult.Warnings}
 		})
 	})
 	return command
+}
+
+func (a *App) lookupPath(name string) (string, error) {
+	if name == "" || filepath.Base(name) != name {
+		return "", os.ErrNotExist
+	}
+	for _, directory := range filepath.SplitList(a.getenv("PATH")) {
+		if directory == "" || !filepath.IsAbs(directory) {
+			continue
+		}
+		candidate := filepath.Join(directory, name)
+		info, err := os.Stat(candidate)
+		if err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", os.ErrNotExist
 }

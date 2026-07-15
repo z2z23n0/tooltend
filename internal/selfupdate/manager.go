@@ -26,13 +26,14 @@ var ErrHomebrewManaged = errors.New("self-update is managed by Homebrew; run bre
 type VerifierFactory func(currentSequence uint64) (Verifier, error)
 
 type Manager struct {
-	StateDir       string
-	Executable     string
-	ManifestURL    string
-	Fetcher        Fetcher
-	Verifier       VerifierFactory
-	Now            func() time.Time
-	CurrentVersion string
+	StateDir        string
+	Executable      string
+	ManifestURL     string
+	Fetcher         Fetcher
+	Verifier        VerifierFactory
+	Now             func() time.Time
+	CurrentVersion  string
+	CurrentSequence uint64
 
 	// Test seams for deterministic concurrency barriers. Production managers
 	// leave both callbacks nil.
@@ -70,7 +71,7 @@ type PreparedRelease struct {
 }
 
 func (m Manager) Status() (Status, error) {
-	sequence, err := readSequence(m.StateDir)
+	sequence, err := m.currentSequence()
 	if err != nil {
 		return Status{}, err
 	}
@@ -102,7 +103,7 @@ func (m Manager) Check(ctx context.Context) (Verified, error) {
 // Prepare binds a later confirmed stage operation to the exact signed
 // envelope shown in its preview. It is read-only and does not fetch the asset.
 func (m Manager) Prepare(ctx context.Context) (PreparedRelease, error) {
-	sequence, err := readSequence(m.StateDir)
+	sequence, err := m.currentSequence()
 	if err != nil {
 		return PreparedRelease{}, err
 	}
@@ -159,7 +160,7 @@ func (m Manager) StagePrepared(ctx context.Context, prepared PreparedRelease) (p
 }
 
 func (m Manager) stagePreparedLocked(ctx context.Context, prepared PreparedRelease) (Pending, error) {
-	sequence, err := readSequence(m.StateDir)
+	sequence, err := m.currentSequence()
 	if err != nil {
 		return Pending{}, err
 	}
@@ -255,7 +256,7 @@ func (m Manager) applyPendingLocked(ctx context.Context) (ApplyResult, error) {
 	if isHomebrewExecutable(executable) {
 		return ApplyResult{}, ErrHomebrewManaged
 	}
-	sequence, err := readSequence(m.StateDir)
+	sequence, err := m.currentSequence()
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -508,6 +509,17 @@ func readPending(stateDir string) (*Pending, error) {
 }
 
 func sequenceFile(stateDir string) string { return filepath.Join(stateDir, "self-update", "sequence") }
+
+func (m Manager) currentSequence() (uint64, error) {
+	stored, err := readSequence(m.StateDir)
+	if err != nil {
+		return 0, err
+	}
+	if m.CurrentSequence > stored {
+		return m.CurrentSequence, nil
+	}
+	return stored, nil
+}
 
 func readSequence(stateDir string) (uint64, error) {
 	data, err := os.ReadFile(sequenceFile(stateDir))

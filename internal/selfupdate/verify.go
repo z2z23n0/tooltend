@@ -22,6 +22,19 @@ const MaxManifestBytes = 1 << 20
 // self-update.
 var ReleasePublicKeyHex string
 
+type SignatureCapability struct {
+	KeyID    string `json:"key_id"`
+	Embedded bool   `json:"embedded"`
+	Valid    bool   `json:"valid"`
+}
+
+func EmbeddedSignatureCapability() SignatureCapability {
+	value := SignatureCapability{KeyID: "tooltend-release-v1", Embedded: ReleasePublicKeyHex != ""}
+	key, err := hex.DecodeString(ReleasePublicKeyHex)
+	value.Valid = err == nil && len(key) == ed25519.PublicKeySize
+	return value
+}
+
 type Envelope struct {
 	KeyID     string          `json:"key_id"`
 	Manifest  json.RawMessage `json:"manifest"`

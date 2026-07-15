@@ -17,16 +17,28 @@ import (
 )
 
 type statusData struct {
-	Initialized       bool     `json:"initialized"`
-	Issues            []string `json:"issues,omitempty"`
-	Components        int      `json:"components"`
-	Bindings          int      `json:"bindings"`
-	ManagedBindings   int      `json:"managed_bindings"`
-	UpdatesAvailable  int      `json:"updates_available"`
-	NeedsReview       int      `json:"needs_review"`
-	FailedCandidates  int      `json:"failed_candidates"`
-	PendingTasks      int      `json:"pending_tasks"`
-	UnfinishedActions int      `json:"unfinished_activations"`
+	Initialized         bool        `json:"initialized"`
+	Issues              []string    `json:"issues,omitempty"`
+	Bundles             int         `json:"bundles"`
+	ConfiguredBundles   int         `json:"configured_bundles"`
+	ManagedBundles      int         `json:"managed_bundles"`
+	ObservedBundles     int         `json:"observed_bundles"`
+	UnconfiguredBundles int         `json:"unconfigured_bundles"`
+	UnresolvedBundles   int         `json:"unresolved_bundles"`
+	UpdatesAvailable    int         `json:"updates_available"`
+	FailedTransactions  int         `json:"failed_transactions"`
+	PendingTasks        int         `json:"pending_tasks"`
+	UnfinishedActions   int         `json:"unfinished_transactions"`
+	Debug               statusDebug `json:"debug"`
+}
+
+type statusDebug struct {
+	Components       int `json:"components"`
+	Bindings         int `json:"bindings"`
+	ManagedBindings  int `json:"managed_bindings"`
+	NeedsReview      int `json:"needs_review"`
+	FailedCandidates int `json:"failed_candidates"`
+	LegacyTasks      int `json:"legacy_pending_tasks"`
 }
 
 type componentSummary struct {
@@ -97,10 +109,10 @@ func (a *App) newStatusCommand() *cobra.Command {
 		if err != nil {
 			return nil, err
 		}
-		result.Components, result.Bindings = len(components), len(bindings)
+		result.Debug.Components, result.Debug.Bindings = len(components), len(bindings)
 		for _, binding := range bindings {
 			if binding.Managed {
-				result.ManagedBindings++
+				result.Debug.ManagedBindings++
 			}
 		}
 		for _, binding := range bindings {
@@ -120,20 +132,36 @@ func (a *App) newStatusCommand() *cobra.Command {
 			}
 			for _, candidate := range candidates {
 				switch candidate.Status {
-				case model.CandidateAvailable:
-					result.UpdatesAvailable++
 				case model.CandidateNeedsReview:
-					result.NeedsReview++
+					result.Debug.NeedsReview++
 				case model.CandidateFailed:
-					result.FailedCandidates++
+					result.Debug.FailedCandidates++
 				}
 			}
+		}
+		bundleCounts, err := database.BundleCounts(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result.Bundles = bundleCounts.Total
+		result.ConfiguredBundles = bundleCounts.Configured
+		result.ManagedBundles = bundleCounts.Managed
+		result.ObservedBundles = bundleCounts.Observe
+		result.UnconfiguredBundles = bundleCounts.Unconfigured
+		result.UnresolvedBundles = bundleCounts.Unresolved
+		result.UpdatesAvailable = bundleCounts.UpdatesAvailable
+		result.FailedTransactions = bundleCounts.FailedTransactions
+		if result.Bundles == 0 {
+			result.Issues = append(result.Issues, "bundle_inventory_missing")
 		}
 		tasks, err := database.CountTasks(ctx)
 		if err != nil {
 			return nil, err
 		}
-		result.PendingTasks = tasks.Pending + tasks.Running
+		result.Debug.LegacyTasks = tasks.Pending + tasks.Running
+		if err := database.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM bundle_tasks WHERE status IN ('pending','running')`).Scan(&result.PendingTasks); err != nil {
+			return nil, err
+		}
 		intents, err := database.ListUnfinishedActivations(ctx)
 		if err != nil {
 			return nil, err
@@ -142,7 +170,11 @@ func (a *App) newStatusCommand() *cobra.Command {
 		if err != nil {
 			return nil, err
 		}
-		result.UnfinishedActions = len(intents) + len(adoptions)
+		bundleTransactions, err := database.ListUnfinishedBundleTransactions(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result.UnfinishedActions = len(intents) + len(adoptions) + len(bundleTransactions)
 		for _, intent := range adoptions {
 			if intent.Phase == store.AdoptionBlocked {
 				result.Issues = append(result.Issues, "adoption_recovery_blocked")

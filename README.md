@@ -1,22 +1,28 @@
 # ToolTend
 
-**Lifecycle manager for coding-agent extensions.**
+**Bundle lifecycle manager for coding-agent tooling.**
 
 *Keep your coding-agent tooling current.*
 
-ToolTend 是面向 Codex 和 Claude Code 的本地生命周期管理器。它统一盘点 Skill、Plugin、Hook、stdio MCP Server，以及这些扩展明确依赖的专用 CLI；在可验证、可回滚的边界内检查更新、保留本地修改、原子切换版本，并在失败时继续使用旧版本。
+ToolTend 是面向 Codex 和 Claude Code 的本地生命周期管理器。它把同一个工具产品的 CLI、Skill、Hook、App、配置和内嵌二进制聚合成一个 Bundle，用同一次 Release、同一个策略和同一笔事务管理；同一份物理安装被多个 Agent 使用时只更新一次。
 
-ToolTend V1 不提供扩展市场、发布、搜索或卸载，也不接管通用 CLI、项目依赖、远程 HTTP MCP 的版本和整台机器。
+ToolTend v0.2 不提供扩展市场、在线 recipe、搜索或卸载，也不会在初始化时自动接管任何已有工具。Component/Binding 仍保留为底层发现证据和兼容接口，但不再是自动更新的调度单位。
 
 ## 安装
 
-需要 Go 1.22 或更新版本。可以从源码安装到 `~/.local/bin`：
+正式版本可以直接从 GitHub Release 安装到 `~/.local/bin`。安装器通过 GitHub HTTPS 获取匹配平台资产，并按 release manifest 校验字节数和 SHA-256：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/z2z23n0/tooltend/main/install.sh | bash
+```
+
+从源码安装需要 Go 1.22 或更新版本：
 
 ```bash
 ./scripts/install.sh
 ```
 
-也可以直接安装 Go module：
+也可以安装 Go module 开发构建；开发构建不含 release 公钥，不能使用签名自更新：
 
 ```bash
 go install github.com/z2z23n0/tooltend/cmd/tooltend@latest
@@ -29,7 +35,40 @@ tooltend version
 tooltend init
 ```
 
-`tooltend init` 在最终确认前只读取本机状态。它只扫描 Codex、Claude Code 的官方配置层、已知扩展目录和用户选择的项目，不遍历整个 home。统一预览会列出状态目录、Host Hook、每日任务、runtime shim 和配置变更；交互确认一次后才写入，并为已确认的精确 npm/Python runtime 异步排队安全迁移。
+`tooltend init` 在最终确认前只读取本机状态。确认后会安装 ToolTend 自己的 Hook、shim 和 scheduler，扫描并聚合 Bundle，但不会迁移 runtime、执行外部安装器或排队接管任务。所有发现的 Bundle 初始状态都是 `unconfigured`。
+
+已有 ToolTend 状态需要完全重建时，先预览再确认：
+
+```bash
+tooltend init --reset-state --dry-run
+tooltend init --reset-state --yes
+```
+
+重置前会获取全局锁、检查 managed 对象和未完成 journal，并把 config、state、database、data 与基础设施状态备份到相邻的 `tooltend-backups/<timestamp>/`。任一步失败会恢复旧状态和 scheduler。
+
+## Bundle 模型
+
+```text
+Bundle
+  ├─ BundleRelease：一次整体、精确解析的版本
+  ├─ BundleArtifact：CLI / Skill / Hook / App / Config / Binary
+  ├─ Installation：唯一物理安装实例
+  ├─ ConsumerBinding：Codex / Claude / 项目如何消费该实例
+  └─ Policy / Transaction / Receipt / Health Check
+```
+
+生命周期所有者固定为：
+
+| 所有者 | 行为 |
+|---|---|
+| `tooltend` | ToolTend staging、切换、验证和回滚 |
+| `delegated` | 编排 npm、mtskills 或官方安装器，并验证、记录结果 |
+| `host-owned` | Codex/Claude 管理；ToolTend 只观察 |
+| `app-owned` | App 自带更新器管理；ToolTend 只观察 |
+| `workspace-linked` | 链接本地仓库；默认只观察 commit 和健康 |
+| `unresolved` | 无法高置信识别；禁止自动更新 |
+
+内置 `bundle-recipe-v1` recipe 随二进制发布。本地扩展放在 `~/.config/tooltend/bundles.d/*.toml`，首次配置必须显式信任。所有命令只能声明静态 argv，不能使用 shell 字符串。
 
 ## 工作方式
 
@@ -44,76 +83,70 @@ SessionStart / ToolUse / 每日任务 / 用户命令
                     │
                     ▼
        tooltend reconcile --once
-  排他锁 → 恢复 → 扫描 → 检查 → staging → 退出
+  排他锁 → 恢复 → 扫描/聚合 → Bundle 事务 → 退出
                     │
                     ▼
-       generation 或 shim 原子切换
+       Bundle Receipt 与健康状态
 ```
 
 - Hook 热路径不联网、不合并、不调用模型，SQLite 使用 `busy_timeout=0`；数据库繁忙或输入异常时 fail-open。
 - `kick` 只启动一个脱离当前会话的一次性 worker。全局文件锁保证并发 Session 不会并行更新。
 - macOS 使用 launchd，Linux 使用 systemd user timer；两者每天启动一次 `reconcile --once`，没有常驻 ToolTend 进程。
-- SQLite 和文件系统之间使用 activation intent journal。进程中断后，下一次 worker 会按真实 generation 指针完成提交或回滚。
-- 正常更新、回滚和 adopt 都生成 Receipt，可供 `history` 审计。
+- 未执行 `bundles configure` 的 Bundle 不检查更新、不下载，也不调用安装器。
+- Bundle 更新先完成所有 Artifact 的解析、校验和 staging，再按物理 Installation 激活；失败时按相反顺序补偿。
+- Bundle 事务使用步骤 journal。中断、失败、回滚和健康检查都有 Bundle 级 Receipt 可审计。
 
 ## 策略
 
-每个 Binding 有独立策略：
+每个 Bundle 有一个明确策略：
 
 ```toml
-track_channel = "stable" # stable | latest | main | semver | exact
-constraint = "^1.6"
-apply_mode = "auto"      # auto | manual | ignore
-notify_mode = "failures" # all | failures | none
+mode = "auto" # auto | manual | observe | ignore
 ```
 
-- `auto`：只有来源明确、Binding 已 adopt、验证通过且具有可靠回滚边界时，后台 staging 并激活。
-- `manual`：后台只 resolve 并记录可用更新；主动运行 `tooltend update` 后才下载和应用。
-- `ignore`：保留在 inventory 中，不联网检查，也不更新。
-- `exact` 是固定版本通道，不另设 `pin`。
-- 本地 policy 是权限上限。项目 manifest 可以声明版本目标，但不能授予来源信任，也不能把本机的 `manual`、`ignore` 或 `exact` 放宽。
+- `auto`：仅允许 recipe 同时具备精确解析、完整 staging、激活、健康检查和可靠补偿回滚。
+- `manual`：允许检查更新，但每次整包应用都需要用户确认。
+- `observe`：只记录版本、来源、漂移和健康，不执行替换命令。
+- `ignore`：保留发现证据，不检查更新。
 
-无 Baseline 的已有副本按 Fork 处理并保持 `manual`，不会伪造三方合并。Hook 内容、执行权限、Host 信任哈希或来源身份发生变化时，旧版本继续生效，候选进入 `needs_review`。
+`host-owned`、`app-owned`、`workspace-linked` 和 `unresolved` 只能选择 `observe` 或 `ignore`。交互配置中回车表示跳过，未选择的 Bundle 始终保持 `unconfigured`。
 
 ## 更新与回滚
 
-文件型组件在 adopt 后进入 ToolTend generation 目录；原安装位置成为稳定指针。每次候选依次经过：
+每次 Bundle 更新严格依次经过：
 
 ```text
-resolve → staging → 来源/完整性验证
-→ Baseline + Binding Overlay + 新上游三方合并
-→ 确定性验证 → 必要的 candidate-bound review
-→ intent journal → 原子指针切换 → 健康检查 → Receipt
+解析整体 BundleRelease 和精确 Artifact 版本
+→ 全部下载、完整性校验和 staging
+→ 兼容性、权限、Hook 和本地修改检查
+→ 每个物理 Installation 只更新一次
+→ 派生步骤和 Bundle/Artifact 健康检查
+→ 提交 Receipt；失败则反向补偿
 ```
 
-本地修改以 Binding Overlay 保存，因此相同组件在不同 Agent 或项目中的定制互不覆盖。文本冲突、验证失败、审查结果为 `conflict`/`uncertain` 或 candidate hash 不匹配时，不切换当前版本。
+delegated driver 复用用户现有认证环境，但不会保存或输出 registry token、环境变量或完整命令。默认 resolve 超时 30 秒、安装 5 分钟、健康检查 30 秒，最多重试 3 次。
 
-runtime 组件采用隔离环境和稳定 shim。npm、pipx/uv 的原生全局安装在 adopt 前保持 `manual`；迁移先重建并验证精确版本，不自动卸载原安装。
+## 发现证据
 
-## 适配器边界
+发现优先读取 npm `package.json`、Git commit、GitHub Release、本机 `.agents/.skill-lock.json`、mtskills 来源记录和签名 manifest、App `Info.plist`/代码签名/Sparkle，以及仓库链接。Skill 文档里的 `latest`、示例命令和依赖约束只作为需求证据，绝不会当作已安装版本。
 
-| 适配器 | 发现/检查 | 自动更新边界 | 回滚 |
-|---|---|---|---|
-| Git Skill / Plugin / Hook | 支持 | managed、来源和 Baseline 明确、确定性验证通过；Hook 信任变化除外 | generation 指针 |
-| npm CLI / stdio MCP | 支持 | adopt 到隔离 prefix 和稳定 shim 后 | 精确版本 generation |
-| npx package 引用 | 解析 package | adopt 为固定 runtime 或 wrapper 后 | 恢复旧 wrapper |
-| pipx / uv tool | 支持 | adopt 到隔离环境和 shim 后 | 精确版本环境 |
-| uvx package 引用 | 观察 | adopt 为持久 runtime 后 | 恢复旧 runtime |
-| Homebrew | 发现和检查 | 默认 `manual`；只有降级路径预验证后才可能自动 | 原生精确降级 |
-| 远程 HTTP MCP | 配置与可用性观察 | 不做版本更新 | 不适用 |
-| 未识别安装器 | 观察 | 不猜测升级命令 | 不适用 |
-
-`git`、`gh`、`node`、`npx`、`bash` 等载体不会因为普通命令调用被纳入 inventory。
+Codex 插件缓存由 Host 管理，ToolTend 聚合为 `host-owned` 观察对象，不参与下载或替换。无法高置信聚合的对象以 fallback Bundle 保留，`bundles list --all` 才展示。
 
 ## CLI
 
 ```text
 tooltend init
+tooltend init --reset-state --dry-run|--yes
 tooltend scan
 tooltend status
+tooltend bundles list [--all]
+tooltend bundles show <bundle>
+tooltend bundles configure [--set <bundle>=auto|manual|observe|ignore]
+tooltend bundles update [<bundle> | --all] [--stage-only]
+tooltend bundles rollback <bundle> [--to <release-or-receipt>]
+tooltend bundles history [<bundle>]
+tooltend bundles doctor [<bundle>]
 tooltend components list
-tooltend components list --managed
-tooltend components list --all
 tooltend components show <component>
 tooltend policy set <component>
 tooltend update [component | --all]
@@ -128,7 +161,7 @@ tooltend doctor [--repair]
 
 所有命令支持 `--json`；写操作支持 `--dry-run`。在非交互或 JSON 模式中，未提供 `--yes` 的写操作返回 `confirmation_required` 和完整预览，不会提示或偷偷写入。
 
-`components list` 默认只显示具有真实 Binding、且生命周期不由 Codex 等 Host 自身管理的组件；`--managed` 只显示已 adopt 的 Binding，`--all` 用于查看包含声明依赖和 Host-owned 缓存在内的完整发现结果。Codex 插件缓存仅作观察，不参与 ToolTend 更新检查，也不能 adopt。
+`components`、`policy`、`adopt`、单组件 `update/rollback/history/review` 是 v0.1 兼容入口，会输出弃用提示。它们不再决定用户看到的 Bundle 数量或 Bundle 更新状态。
 
 JSON 输出使用稳定的 V1 envelope：
 
@@ -164,16 +197,18 @@ tooltend project sync --yes
 | 内容 | 默认位置 |
 |---|---|
 | 配置 | `${XDG_CONFIG_HOME:-~/.config}/tooltend/config.toml` |
-| SQLite 状态 | `${XDG_STATE_HOME:-~/.local/state}/tooltend/state.db` |
+| SQLite schema v5 状态 | `${XDG_STATE_HOME:-~/.local/state}/tooltend/state.db` |
 | activation lock | `${XDG_STATE_HOME:-~/.local/state}/tooltend/activation.lock` |
 | objects / staging / generations | `${XDG_DATA_HOME:-~/.local/share}/tooltend/` |
 | stable shims | `~/.local/bin/` |
+| 本地 Bundle recipe | `${XDG_CONFIG_HOME:-~/.config}/tooltend/bundles.d/*.toml` |
+| reset 备份 | config/state/data 相邻的 `tooltend-backups/<timestamp>/` |
 
 SQLite 使用 WAL，schema migration 前创建备份。数据库不保存完整 Prompt、transcript、未经解析的原始命令、环境变量、MCP secret 或 registry token；Hook 只记录标准化 package/version、事件类型和不可逆 correlation hash。
 
 ## ToolTend 自更新
 
-正式 release 的自更新 manifest 使用嵌入式 Ed25519 公钥验证，平台 asset 同时校验签名 manifest 中的 SHA-256 和字节数。签名、序列号、平台或完整性任一不匹配都不会进入 staging。没有嵌入 release key 的开发构建拒绝自更新。
+正式 release 包含 darwin/linux 的 arm64/amd64 原始可执行文件、`checksums.txt` 和 Ed25519 签名 manifest。安装后的自更新使用二进制内嵌公钥验证签名，并同时检查 release sequence、平台、SHA-256 和字节数。任一不匹配都不会进入 staging；开发构建拒绝自更新。
 
 通过 Homebrew 安装的版本只提示执行对应的 `brew upgrade tooltend`，不会绕过 Homebrew 替换自身。
 

@@ -1,0 +1,15 @@
+schema = "bundle-recipe-v1"
+id = "vibe-island"
+version = "1"
+name = "Vibe Island"
+owner = "app-owned"
+confidence = "high"
+description = "Vibe Island macOS application with its Sparkle updater"
+
+[[artifacts]]
+key = "app"
+name = "Vibe Island.app"
+kind = "app"
+driver = "sparkle"
+required = true
+probes = ["path:/Applications/Vibe Island.app"]

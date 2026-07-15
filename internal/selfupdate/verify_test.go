@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,5 +60,18 @@ func TestVerifierRejectsReplayAndDuplicateKeys(t *testing.T) {
 	verifier := Verifier{Keys: map[string]ed25519.PublicKey{"test": key}, CurrentSequence: 1, OS: "x", Arch: "y"}
 	if _, err := verifier.Verify(raw); err == nil {
 		t.Fatal("expected replay rejection")
+	}
+}
+
+func TestEmbeddedSignatureCapabilityDoesNotExposeKeyMaterial(t *testing.T) {
+	original := ReleasePublicKeyHex
+	t.Cleanup(func() { ReleasePublicKeyHex = original })
+	ReleasePublicKeyHex = ""
+	if value := EmbeddedSignatureCapability(); value.Embedded || value.Valid || value.KeyID == "" {
+		t.Fatalf("development capability = %+v", value)
+	}
+	ReleasePublicKeyHex = strings.Repeat("ab", ed25519.PublicKeySize)
+	if value := EmbeddedSignatureCapability(); !value.Embedded || !value.Valid {
+		t.Fatalf("release capability = %+v", value)
 	}
 }
