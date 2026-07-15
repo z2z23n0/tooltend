@@ -17,6 +17,9 @@ health_argv = ["sherlog", "--version"]
 [[artifacts.selectors]]
 field = "name"
 equals = "sherlog|shlog"
+[[artifacts.selectors]]
+field = "kind"
+equals = "cli"
 
 [[artifacts]]
 key = "skill"

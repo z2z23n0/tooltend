@@ -119,6 +119,18 @@ func (s *Store) PruneUnconfiguredBundles(ctx context.Context, seenBefore time.Ti
 	return result.RowsAffected()
 }
 
+// PruneUnconfiguredInstallations removes stale discovery evidence inside
+// bundles that the user has not configured. Configured bundles retain their
+// installation graph until an explicit lifecycle action changes it.
+func (s *Store) PruneUnconfiguredInstallations(ctx context.Context, seenBefore time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM installations
+		WHERE last_seen_at<? AND bundle_id IN (SELECT id FROM bundles WHERE config_state='unconfigured')`, timeText(seenBefore))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *Store) UpsertBundleRelease(ctx context.Context, value model.BundleRelease) error {
 	if value.ManifestJSON == "" {
 		value.ManifestJSON = "{}"

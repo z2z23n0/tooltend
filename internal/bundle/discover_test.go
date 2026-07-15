@@ -56,7 +56,12 @@ func TestDiscoverDeduplicatesPhysicalInstallAndReadsPackageMetadata(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	result, err := Discover(ctx, database, DiscoverOptions{HomeDir: t.TempDir(), Executable: "/missing/tooltend", LookupPath: func(string) (string, error) { return "", os.ErrNotExist }, Now: func() time.Time { return now }})
+	result, err := Discover(ctx, database, DiscoverOptions{HomeDir: t.TempDir(), Executable: "/missing/tooltend", LookupPath: func(command string) (string, error) {
+		if command == "oa-skills" {
+			return linkOne, nil
+		}
+		return "", os.ErrNotExist
+	}, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +76,7 @@ func TestDiscoverDeduplicatesPhysicalInstallAndReadsPackageMetadata(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(installations) != 1 || installations[0].ObservedVersion != "1.2.3" {
+	if len(installations) != 1 || installations[0].ObservedVersion != "1.2.3" || installations[0].PackageIdentity != "@it/oa-skills" {
 		t.Fatalf("installations = %#v", installations)
 	}
 	consumers, err := database.ListConsumerBindings(ctx, installations[0].ID)
@@ -80,6 +85,95 @@ func TestDiscoverDeduplicatesPhysicalInstallAndReadsPackageMetadata(t *testing.T
 	}
 	if len(consumers) != 2 {
 		t.Fatalf("consumers = %#v", consumers)
+	}
+}
+
+func TestDiscoverPrunesStaleProbeWhenBindingProvidesRicherEvidence(t *testing.T) {
+	database, err := store.OpenRW(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	firstSeen := time.Now().UTC().Add(-time.Minute)
+	packageRoot := filepath.Join(t.TempDir(), "node_modules", "@it", "oa-skills")
+	if err := os.MkdirAll(filepath.Join(packageRoot, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packageRoot, "package.json"), []byte(`{"name":"@it/oa-skills","version":"2.0.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	physical := filepath.Join(packageRoot, "bin", "oa-skills")
+	if err := os.WriteFile(physical, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(command string) (string, error) {
+		if command == "oa-skills" {
+			return physical, nil
+		}
+		return "", os.ErrNotExist
+	}
+	if _, err := Discover(ctx, database, DiscoverOptions{HomeDir: t.TempDir(), Executable: "/missing/tooltend", LookupPath: lookup, Now: func() time.Time { return firstSeen }}); err != nil {
+		t.Fatal(err)
+	}
+	bundleValue, err := database.GetBundleBySlug(ctx, "citadel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installations, err := database.ListInstallations(ctx, bundleValue.ID)
+	if err != nil || len(installations) != 1 || installations[0].SourceIdentity != "" || installations[0].PackageIdentity != "@it/oa-skills" || installations[0].ObservedVersion != "2.0.0" {
+		t.Fatalf("probe installations = %#v err=%v", installations, err)
+	}
+
+	now := firstSeen.Add(time.Minute)
+	source := model.Source{ID: "source", Kind: model.SourceNPM, Locator: "https://registry.npmjs.org/@it/oa-skills", PackageName: "@it/oa-skills", IdentityHash: "source-hash", CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertSource(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	component := model.LogicalComponent{ID: "component", Kind: model.ComponentCLI, Name: "@it/oa-skills", SourceID: source.ID, LogicalKey: "oa-skills", CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertComponent(ctx, component); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertBinding(ctx, model.Binding{ID: "codex", ComponentID: component.ID, Host: model.HostCodex, Scope: model.ScopeGlobal, InstallPath: physical, Classification: model.ClassificationClean, LastSeenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Discover(ctx, database, DiscoverOptions{HomeDir: t.TempDir(), Executable: "/missing/tooltend", LookupPath: lookup, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installations, err = database.ListInstallations(ctx, bundleValue.ID)
+	if err != nil || len(installations) != 1 || installations[0].SourceIdentity != "source-hash" {
+		t.Fatalf("merged installations = %#v err=%v", installations, err)
+	}
+	if result.Pruned == 0 {
+		t.Fatal("stale probe installation was not pruned")
+	}
+}
+
+func TestBuiltinRecipesDoNotTreatSkillsAsCLIsOrDerivedHooks(t *testing.T) {
+	catalog, err := LoadCatalog("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainlineRecipe, ok := catalog.Get("mainline")
+	if !ok {
+		t.Fatal("mainline recipe not found")
+	}
+	mainlineSkill := observedInstallation{component: model.LogicalComponent{Name: "mainline", Kind: model.ComponentSkill}, dependencies: []model.Dependency{{PackageIdentity: "cli:mainline"}}}
+	for _, artifact := range mainlineRecipe.Artifacts {
+		if (artifact.Key == "cli" || artifact.Key == "hooks") && artifactMatches(artifact, mainlineSkill) {
+			t.Fatalf("mainline skill matched %s artifact", artifact.Key)
+		}
+	}
+	sherlogRecipe, ok := catalog.Get("sherlog")
+	if !ok {
+		t.Fatal("sherlog recipe not found")
+	}
+	sherlogSkill := observedInstallation{component: model.LogicalComponent{Name: "sherlog", Kind: model.ComponentSkill}}
+	for _, artifact := range sherlogRecipe.Artifacts {
+		if artifact.Key == "cli" && artifactMatches(artifact, sherlogSkill) {
+			t.Fatal("sherlog skill matched CLI artifact")
+		}
 	}
 }
 
