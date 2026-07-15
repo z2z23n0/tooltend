@@ -120,10 +120,15 @@ func Discover(ctx context.Context, database *store.Store, options DiscoverOption
 	if err := persistFallbacks(ctx, database, observed, matchedBindings, now, options.HomeDir, &result); err != nil {
 		return result, err
 	}
-	result.Pruned, err = database.PruneUnconfiguredBundles(ctx, now)
+	prunedInstallations, err := database.PruneUnconfiguredInstallations(ctx, now)
 	if err != nil {
 		return result, err
 	}
+	prunedBundles, err := database.PruneUnconfiguredBundles(ctx, now)
+	if err != nil {
+		return result, err
+	}
+	result.Pruned = prunedInstallations + prunedBundles
 	if err := refreshDiscoveryCounts(ctx, database, &result); err != nil {
 		return result, err
 	}
@@ -281,8 +286,15 @@ func resolveProbe(ctx context.Context, probe string, recipe Recipe, artifact Art
 		return matchedInstallation{}, false
 	}
 	path = normalizeInstallationPath(path, options.HomeDir)
-	version := ""
+	packageIdentity := recipe.ID
+	version, observedHash := "", ""
 	metadata := map[string]any{"probe": probe}
+	if artifact.Driver == "npm" {
+		if packageName, packageVersion, packageHash := nearestPackageMetadata(path); packageName != "" {
+			packageIdentity, version, observedHash = packageName, packageVersion, packageHash
+			metadata["npm_package"] = packageName
+		}
+	}
 	if recipe.ID == "tooltend" && options.BuildVersion != "" && options.BuildVersion != "dev" {
 		version = strings.TrimPrefix(options.BuildVersion, "v")
 	}
@@ -295,7 +307,7 @@ func resolveProbe(ctx context.Context, probe string, recipe Recipe, artifact Art
 		}
 		metadata["code_signature_valid"] = verifyAppSignature(ctx, path)
 	}
-	return matchedInstallation{path: path, packageIdentity: recipe.ID, version: version, metadata: metadata}, true
+	return matchedInstallation{path: path, packageIdentity: packageIdentity, version: version, hash: observedHash, metadata: metadata}, true
 }
 
 func persistRecipeMatch(ctx context.Context, database *store.Store, recipe Recipe, confidence model.BundleConfidence, matches map[string][]matchedInstallation, now time.Time, result *DiscoverResult) error {
@@ -697,18 +709,67 @@ func countMatches(values map[string][]matchedInstallation) int {
 }
 
 func dedupeMatches(values []matchedInstallation) []matchedInstallation {
-	seen := map[string]int{}
 	result := make([]matchedInstallation, 0, len(values))
 	for _, value := range values {
-		key := value.path + "\x00" + value.packageIdentity + "\x00" + value.sourceIdentity
-		if index, exists := seen[key]; exists {
-			result[index].consumers = append(result[index].consumers, value.consumers...)
-			continue
+		merged := false
+		for index := range result {
+			if samePhysicalEvidence(result[index], value) {
+				result[index] = mergeMatchEvidence(result[index], value)
+				merged = true
+				break
+			}
 		}
-		seen[key] = len(result)
-		result = append(result, value)
+		if !merged {
+			result = append(result, value)
+		}
 	}
 	return result
+}
+
+func samePhysicalEvidence(left, right matchedInstallation) bool {
+	if left.path == "" || left.path != right.path {
+		return false
+	}
+	if left.packageIdentity == right.packageIdentity && left.sourceIdentity == right.sourceIdentity {
+		return true
+	}
+	// A command/path probe is weaker evidence for an already observed path. It
+	// must enrich that physical installation instead of creating a second row
+	// merely because the probe cannot know the source identity.
+	return probeMatch(left) || probeMatch(right)
+}
+
+func mergeMatchEvidence(left, right matchedInstallation) matchedInstallation {
+	if probeMatch(left) && !probeMatch(right) {
+		left, right = right, left
+	}
+	if left.packageIdentity == "" {
+		left.packageIdentity = right.packageIdentity
+	}
+	if left.sourceIdentity == "" {
+		left.sourceIdentity = right.sourceIdentity
+	}
+	if left.version == "" {
+		left.version = right.version
+	}
+	if left.hash == "" {
+		left.hash = right.hash
+	}
+	left.consumers = append(left.consumers, right.consumers...)
+	if left.metadata == nil {
+		left.metadata = map[string]any{}
+	}
+	for key, value := range right.metadata {
+		if _, exists := left.metadata[key]; !exists {
+			left.metadata[key] = value
+		}
+	}
+	return left
+}
+
+func probeMatch(value matchedInstallation) bool {
+	_, ok := value.metadata["probe"]
+	return ok
 }
 
 func normalizeInstallationPath(path, home string) string {
@@ -766,6 +827,36 @@ func actualInstalledVersion(path, packageIdentity, observed string) (string, str
 		return strings.TrimPrefix(strings.TrimSpace(observed), "v"), ""
 	}
 	return "", ""
+}
+
+func nearestPackageMetadata(path string) (string, string, string) {
+	cursor := path
+	if info, err := os.Stat(cursor); err == nil && !info.IsDir() {
+		cursor = filepath.Dir(cursor)
+	}
+	for depth := 0; depth < 8; depth++ {
+		data, err := os.ReadFile(filepath.Join(cursor, "package.json"))
+		if err == nil {
+			var pkg struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			}
+			if json.Unmarshal(data, &pkg) == nil && strings.TrimSpace(pkg.Name) != "" {
+				digest := sha256.Sum256(data)
+				version := ""
+				if exactVersion(pkg.Version) {
+					version = strings.TrimPrefix(strings.TrimSpace(pkg.Version), "v")
+				}
+				return strings.TrimSpace(pkg.Name), version, hex.EncodeToString(digest[:])
+			}
+		}
+		parent := filepath.Dir(cursor)
+		if parent == cursor {
+			break
+		}
+		cursor = parent
+	}
+	return "", "", ""
 }
 
 var semverLike = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`)

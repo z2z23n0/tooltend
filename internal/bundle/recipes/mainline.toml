@@ -40,6 +40,3 @@ name = "Mainline generated hooks"
 kind = "hook"
 driver = "mainline-hooks"
 required = false
-[[artifacts.selectors]]
-field = "dependency"
-equals = "cli:mainline"
