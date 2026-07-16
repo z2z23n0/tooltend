@@ -1,1 +1,1 @@
-{"event_id":"evt_4029e9ef","schema_version":1,"event_type":"intent.abandoned","actor_id":"actor_bf5ecfe5","actor_name":"z2z23n0","timestamp":"2026-07-16T09:35:07Z","intent_id":"int_8163f432","reason":"该 Intent 将本机 Bundle 选择错误扩张为开源仓库的具体工具接管实现，用户已确认取消。"}
+{"event_id":"evt_f8536447","schema_version":1,"event_type":"intent.abandoned","actor_id":"actor_bf5ecfe5","actor_name":"z2z23n0","timestamp":"2026-07-16T09:35:14Z","intent_id":"int_f13a1ccd","reason":"该修复依赖已取消的具体工具接管分支，随错误范围一并取消。"}
