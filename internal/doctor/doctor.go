@@ -270,8 +270,10 @@ func schedulerFileContentMatches(name, content, executable, stateDir string) boo
 		return true
 	}
 	switch name {
-	case "io.tooltend.reconcile.plist", "tooltend-reconcile.service":
-		return containsAll("reconcile", "--once", "--state-dir", filepath.Base(executable), filepath.Base(stateDir))
+	case "io.tooltend.reconcile.plist":
+		return containsAll("reconcile", "--once", "--state-dir", filepath.Base(executable), filepath.Base(stateDir), "<key>PATH</key>")
+	case "tooltend-reconcile.service":
+		return containsAll("reconcile", "--once", "--state-dir", filepath.Base(executable), filepath.Base(stateDir), `Environment="PATH=`)
 	case "tooltend-reconcile.timer":
 		return containsAll("[Timer]", "OnCalendar=*-*-* ", "RandomizedDelaySec=1h", "Persistent=true", "[Install]", "WantedBy=timers.target")
 	default:
