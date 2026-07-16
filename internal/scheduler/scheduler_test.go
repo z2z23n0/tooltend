@@ -37,6 +37,29 @@ func TestXMLAndSystemdEscaping(t *testing.T) {
 	}
 }
 
+func TestRenderedSchedulesIncludeWorkerPATH(t *testing.T) {
+	options := Options{
+		Executable: "/Users/example/.local/bin/tooltend",
+		StateDir:   "/tmp/state",
+		PathEnv:    "relative:/opt/homebrew/bin:/usr/bin:/opt/homebrew/bin",
+		Hour:       1,
+		Minute:     2,
+	}
+	for name, content := range map[string]string{
+		"launchd": renderLaunchd(options),
+		"systemd": renderSystemdService(options),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(content, "PATH") || !strings.Contains(content, "/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin") {
+				t.Fatalf("schedule does not preserve the ToolTend executable path: %s", content)
+			}
+			if strings.Contains(content, "relative") || strings.Count(content, "/opt/homebrew/bin") != 1 {
+				t.Fatalf("schedule contains an unsafe or duplicate PATH entry: %s", content)
+			}
+		})
+	}
+}
+
 type recordingRunner struct {
 	calls []string
 	fail  string

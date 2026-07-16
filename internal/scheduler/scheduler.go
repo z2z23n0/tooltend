@@ -31,6 +31,7 @@ type Options struct {
 	Executable string
 	Home       string
 	StateDir   string
+	PathEnv    string
 	Hour       int
 	Minute     int
 }
@@ -136,6 +137,7 @@ func randomDailyTime() (int, int) {
 
 func renderLaunchd(options Options) string {
 	args := []string{options.Executable, "reconcile", "--once", "--state-dir", options.StateDir, "--json"}
+	pathEnv := workerPATH(options.Executable, options.PathEnv)
 	var program strings.Builder
 	for _, arg := range args {
 		program.WriteString("      <string>")
@@ -150,6 +152,10 @@ func renderLaunchd(options Options) string {
   <key>ProgramArguments</key>
   <array>
 ` + program.String() + `  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>` + xmlEscape(pathEnv) + `</string>
+  </dict>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key><integer>` + strconv.Itoa(options.Hour) + `</integer>
@@ -170,8 +176,35 @@ Description=ToolTend one-shot reconciliation
 
 [Service]
 Type=oneshot
+Environment=` + systemdQuote("PATH="+workerPATH(options.Executable, options.PathEnv)) + `
 ExecStart=` + systemdQuote(options.Executable) + ` reconcile --once --state-dir ` + systemdQuote(options.StateDir) + ` --json
 `
+}
+
+func workerPATH(executable, current string) string {
+	if strings.TrimSpace(current) == "" {
+		current = os.Getenv("PATH")
+	}
+	candidates := []string{filepath.Dir(executable)}
+	candidates = append(candidates, filepath.SplitList(current)...)
+	if runtime.GOOS == "darwin" {
+		candidates = append(candidates, "/opt/homebrew/bin", "/opt/homebrew/sbin")
+	}
+	candidates = append(candidates, "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+	seen := map[string]struct{}{}
+	entries := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(strings.TrimSpace(candidate))
+		if !filepath.IsAbs(candidate) {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		entries = append(entries, candidate)
+	}
+	return strings.Join(entries, string(os.PathListSeparator))
 }
 
 func renderSystemdTimer(options Options) string {

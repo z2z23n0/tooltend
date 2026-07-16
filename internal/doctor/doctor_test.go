@@ -83,8 +83,16 @@ Description=ToolTend one-shot reconciliation
 
 [Service]
 Type=oneshot
+Environment="PATH=/opt/tooltend/bin:/usr/bin:/bin"
 ExecStart="/opt/tooltend/bin/tooltend" reconcile --once --state-dir "/var/lib/tooltend-state" --json
 `
+	plist := `<plist><dict>
+<key>ProgramArguments</key><array>
+<string>/opt/tooltend/bin/tooltend</string><string>reconcile</string><string>--once</string>
+<string>--state-dir</string><string>/var/lib/tooltend-state</string>
+</array>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/tooltend/bin:/usr/bin:/bin</string></dict>
+</dict></plist>`
 	timer := `[Unit]
 Description=Run ToolTend reconciliation daily
 
@@ -104,11 +112,14 @@ WantedBy=timers.target
 		stateDir string
 		want     bool
 	}{
+		{name: "plist", file: "io.tooltend.reconcile.plist", content: plist, exe: executable, stateDir: stateDir, want: true},
+		{name: "plist missing path", file: "io.tooltend.reconcile.plist", content: strings.Replace(plist, "<key>PATH</key>", "<key>OLD_PATH</key>", 1), exe: executable, stateDir: stateDir},
 		{name: "service", file: "tooltend-reconcile.service", content: service, exe: executable, stateDir: stateDir, want: true},
 		{name: "timer", file: "tooltend-reconcile.timer", content: timer, exe: executable, stateDir: stateDir, want: true},
 		{name: "timer missing calendar", file: "tooltend-reconcile.timer", content: strings.Replace(timer, "OnCalendar=", "Calendar=", 1), exe: executable, stateDir: stateDir},
 		{name: "timer missing persistence", file: "tooltend-reconcile.timer", content: strings.Replace(timer, "Persistent=true", "Persistent=false", 1), exe: executable, stateDir: stateDir},
 		{name: "service missing once", file: "tooltend-reconcile.service", content: strings.Replace(service, "--once", "--continuous", 1), exe: executable, stateDir: stateDir},
+		{name: "service missing path", file: "tooltend-reconcile.service", content: strings.Replace(service, "Environment=", "EnvironmentFile=", 1), exe: executable, stateDir: stateDir},
 		{name: "service wrong executable", file: "tooltend-reconcile.service", content: service, exe: "/opt/tooltend/bin/other", stateDir: stateDir},
 		{name: "service wrong state", file: "tooltend-reconcile.service", content: service, exe: executable, stateDir: "/var/lib/other-state"},
 		{name: "unknown file", file: "schedule.txt", content: service, exe: executable, stateDir: stateDir},
