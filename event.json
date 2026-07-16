@@ -1,1 +1,1 @@
-{"event_id":"evt_f8536447","schema_version":1,"event_type":"intent.abandoned","actor_id":"actor_bf5ecfe5","actor_name":"z2z23n0","timestamp":"2026-07-16T09:35:14Z","intent_id":"int_f13a1ccd","reason":"该修复依赖已取消的具体工具接管分支，随错误范围一并取消。"}
+{"event_id":"evt_20623701","schema_version":1,"event_type":"intent.abandoned","actor_id":"actor_bf5ecfe5","actor_name":"z2z23n0","timestamp":"2026-07-16T09:35:28Z","intent_id":"int_f1360d6c","reason":"PATH 修复将从 origin/main 重新隔离并由新的 Intent 和提交承载。"}
