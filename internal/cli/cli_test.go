@@ -785,6 +785,8 @@ func TestHookRejectsFlagPayloadEventMismatch(t *testing.T) {
 }
 
 func TestHookCLIWithSQLiteMeetsP95Budget(t *testing.T) {
+	skipHookPerformanceTestWhenRequested(t)
+
 	var seedOut, seedErr bytes.Buffer
 	base := testOptions(t, &seedOut, &seedErr, strings.NewReader(""))
 	paths := config.ResolveWith(base.HomeDir, base.Getenv)
@@ -820,6 +822,8 @@ func TestHookCLIWithSQLiteMeetsP95Budget(t *testing.T) {
 }
 
 func TestHookProcessMeetsP95Budget(t *testing.T) {
+	skipHookPerformanceTestWhenRequested(t)
+
 	var seedOut, seedErr bytes.Buffer
 	base := testOptions(t, &seedOut, &seedErr, strings.NewReader(""))
 	paths := config.ResolveWith(base.HomeDir, base.Getenv)
@@ -857,6 +861,13 @@ func TestHookProcessMeetsP95Budget(t *testing.T) {
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
 	if p95 := durations[28]; p95 >= 50*time.Millisecond {
 		t.Fatalf("hook process p95 = %s, want < 50ms", p95)
+	}
+}
+
+func skipHookPerformanceTestWhenRequested(t *testing.T) {
+	t.Helper()
+	if os.Getenv("TOOLTEND_TEST_SKIP_HOOK_PERFORMANCE") == "1" {
+		t.Skip("hook performance tests run separately from the shared package suite")
 	}
 }
 
