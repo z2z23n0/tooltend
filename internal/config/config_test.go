@@ -32,6 +32,9 @@ func TestResolveWithUsesXDGAndIgnoresRelativeXDG(t *testing.T) {
 	if p.DatabaseFile != filepath.Join(home, ".local", "state", "tooltend", "state.db") {
 		t.Fatalf("state path = %s", p.DatabaseFile)
 	}
+	if p.LogsDir != filepath.Join(home, ".local", "state", "tooltend", "logs") {
+		t.Fatalf("logs path = %s", p.LogsDir)
+	}
 }
 
 func TestSaveAtomicRoundTrip(t *testing.T) {

@@ -78,26 +78,29 @@ type BindingResult struct {
 
 type FailureResult struct {
 	BindingID string `json:"binding_id,omitempty"`
+	BundleID  string `json:"bundle_id,omitempty"`
 	TaskID    string `json:"task_id,omitempty"`
 	Code      string `json:"code"`
 	Retrying  bool   `json:"retrying,omitempty"`
 }
 
 type RunResult struct {
-	AlreadyRunning bool                    `json:"already_running"`
-	ScanID         string                  `json:"scan_id,omitempty"`
-	StartedAt      time.Time               `json:"started_at"`
-	FinishedAt     time.Time               `json:"finished_at"`
-	Recovered      int                     `json:"recovered_activations"`
-	BundleRecovery bundle.RecoveryResult   `json:"bundle_recovery"`
-	Inventory      inventory.PersistResult `json:"inventory"`
-	Scheduled      int                     `json:"scheduled"`
-	Succeeded      int                     `json:"succeeded"`
-	Retried        int                     `json:"retried"`
-	Failed         int                     `json:"failed"`
-	Skipped        int                     `json:"skipped"`
-	Results        []BindingResult         `json:"results,omitempty"`
-	Failures       []FailureResult         `json:"failures,omitempty"`
+	AlreadyRunning            bool                    `json:"already_running"`
+	FailureNotificationQueued bool                    `json:"failure_notification_queued,omitempty"`
+	RunID                     string                  `json:"run_id,omitempty"`
+	ScanID                    string                  `json:"scan_id,omitempty"`
+	StartedAt                 time.Time               `json:"started_at"`
+	FinishedAt                time.Time               `json:"finished_at"`
+	Recovered                 int                     `json:"recovered_activations"`
+	BundleRecovery            bundle.RecoveryResult   `json:"bundle_recovery"`
+	Inventory                 inventory.PersistResult `json:"inventory"`
+	Scheduled                 int                     `json:"scheduled"`
+	Succeeded                 int                     `json:"succeeded"`
+	Retried                   int                     `json:"retried"`
+	Failed                    int                     `json:"failed"`
+	Skipped                   int                     `json:"skipped"`
+	Results                   []BindingResult         `json:"results,omitempty"`
+	Failures                  []FailureResult         `json:"failures,omitempty"`
 }
 
 // CodedError lets adapters expose a stable, non-sensitive reason code without

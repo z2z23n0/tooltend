@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestSchemaV5MigratesV4WithBackup(t *testing.T) {
+func TestSchemaV6MigratesV4WithBackup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	db, err := open(path, "rwc", 0, false)
 	if err != nil {
@@ -45,14 +45,14 @@ func TestSchemaV5MigratesV4WithBackup(t *testing.T) {
 	}
 	defer database.Close()
 	version, err := database.UserVersion(context.Background())
-	if err != nil || version != 5 {
+	if err != nil || version != 6 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	var tables int
-	if err := database.DB().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('bundles','bundle_releases','bundle_artifacts','installations','consumer_bindings','bundle_policies','bundle_transactions','bundle_transaction_steps','bundle_receipts','bundle_health_checks','bundle_tasks')`).Scan(&tables); err != nil {
+	if err := database.DB().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('bundles','bundle_releases','bundle_artifacts','installations','consumer_bindings','bundle_policies','bundle_transactions','bundle_transaction_steps','bundle_receipts','bundle_health_checks','bundle_tasks','reconcile_runs')`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if tables != 11 {
+	if tables != 12 {
 		t.Fatalf("bundle tables = %d", tables)
 	}
 	backups, err := filepath.Glob(path + ".backup-v4-*")

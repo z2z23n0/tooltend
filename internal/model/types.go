@@ -400,8 +400,19 @@ type HookEvent struct {
 type Notification struct {
 	CandidateHash string     `json:"candidate_hash"`
 	Kind          string     `json:"kind"`
+	Message       string     `json:"message,omitempty"`
 	QueuedAt      time.Time  `json:"queued_at"`
 	ShownAt       *time.Time `json:"shown_at,omitempty"`
+}
+
+type ReconcileRun struct {
+	ID          string     `json:"id"`
+	Reason      string     `json:"reason"`
+	Status      string     `json:"status"`
+	StartedAt   time.Time  `json:"started_at"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	ErrorCode   string     `json:"error_code,omitempty"`
+	SummaryJSON string     `json:"summary_json"`
 }
 
 type Scan struct {

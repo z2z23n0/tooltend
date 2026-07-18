@@ -137,6 +137,7 @@ func New(options Options) *cobra.Command {
 		a.newHookCommand(),
 		a.newKickCommand(),
 		a.newReconcileCommand(),
+		a.newWatchdogCommand(),
 		a.newVersionCommand(),
 	)
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {

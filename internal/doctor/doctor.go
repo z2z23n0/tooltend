@@ -5,12 +5,16 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/z2z23n0/tooltend/internal/config"
 	"github.com/z2z23n0/tooltend/internal/execx"
@@ -54,6 +58,7 @@ type Options struct {
 
 func Run(ctx context.Context, paths config.Paths) Report {
 	report := Report{Healthy: true, Checks: []Check{}}
+	checkInterval := 24 * time.Hour
 	appendCheck := func(check Check) {
 		report.Checks = append(report.Checks, check)
 		if check.Level == LevelError {
@@ -68,6 +73,7 @@ func Run(ctx context.Context, paths config.Paths) Report {
 		}
 		appendCheck(Check{Name: "config", Level: level, Message: safeMessage("configuration unavailable", err), Repairable: true})
 	} else {
+		checkInterval = value.Check.Interval
 		appendCheck(Check{Name: "config", Level: LevelOK, Message: fmt.Sprintf("configuration version %d is valid", value.Version)})
 	}
 
@@ -121,10 +127,11 @@ func Run(ctx context.Context, paths config.Paths) Report {
 			default:
 				appendCheck(Check{Name: "bundle_coverage", Level: LevelOK, Message: fmt.Sprintf("%d of %d bundles are configured", counts.Configured, counts.Total)})
 			}
+			appendCheck(checkReconcileRun(ctx, database, checkInterval, time.Now()))
 		}
 	}
 
-	for name, path := range map[string]string{"objects": paths.ObjectsDir, "staging": paths.StagingDir, "generations": paths.GenerationsDir} {
+	for name, path := range map[string]string{"objects": paths.ObjectsDir, "staging": paths.StagingDir, "generations": paths.GenerationsDir, "logs": paths.LogsDir} {
 		info, err := os.Stat(path)
 		switch {
 		case errors.Is(err, os.ErrNotExist):
@@ -204,14 +211,14 @@ func checkScheduler(paths config.Paths, home string) Check {
 	for _, schedulerPath := range files {
 		info, err := os.Stat(schedulerPath)
 		if err != nil || !info.Mode().IsRegular() {
-			return Check{Name: "scheduler", Level: LevelWarning, Message: "daily one-shot schedule is not installed", Repairable: true}
+			return Check{Name: "scheduler", Level: LevelWarning, Message: "daily schedule is incomplete or not installed", Repairable: true}
 		}
 		if info.Mode().Perm()&0o077 != 0 {
 			return Check{Name: "scheduler", Level: LevelWarning, Message: "daily one-shot schedule permissions are too broad", Repairable: true}
 		}
 	}
 	if len(files) == 0 {
-		return Check{Name: "scheduler", Level: LevelWarning, Message: "daily one-shot schedule is not installed", Repairable: true}
+		return Check{Name: "scheduler", Level: LevelWarning, Message: "daily schedule is incomplete or not installed", Repairable: true}
 	}
 	return Check{Name: "scheduler", Level: LevelOK, Message: "daily one-shot schedule is installed"}
 }
@@ -227,17 +234,23 @@ func checkSchedulerWithRunner(ctx context.Context, paths config.Paths, home, exe
 	if runner == nil {
 		runner = execx.ExecRunner{}
 	}
-	var err error
 	switch runtime.GOOS {
 	case "darwin":
-		_, err = runner.Run(ctx, "launchctl", "print", fmt.Sprintf("gui/%d/io.tooltend.reconcile", os.Getuid()))
+		for _, label := range []string{"io.tooltend.reconcile", "io.tooltend.watchdog"} {
+			result, err := runner.Run(ctx, "launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), label))
+			if err != nil {
+				return Check{Name: "scheduler", Level: LevelWarning, Message: "daily schedule is not fully registered", Repairable: true}
+			}
+			if code, ok := launchdLastExitCode(string(result.Stdout)); ok && code != 0 {
+				return Check{Name: "scheduler", Level: LevelError, Message: fmt.Sprintf("%s last exited with code %d", label, code), Repairable: true}
+			}
+		}
 	case "linux":
-		_, err = runner.Run(ctx, "systemctl", "--user", "is-enabled", "tooltend-reconcile.timer")
+		if _, err := runner.Run(ctx, "systemctl", "--user", "is-enabled", "tooltend-reconcile.timer", "tooltend-watchdog.timer"); err != nil {
+			return Check{Name: "scheduler", Level: LevelWarning, Message: "daily schedule is not fully registered", Repairable: true}
+		}
 	default:
 		return check
-	}
-	if err != nil {
-		return Check{Name: "scheduler", Level: LevelWarning, Message: "daily one-shot schedule is not registered", Repairable: true}
 	}
 	return check
 }
@@ -261,35 +274,202 @@ func schedulerFilesMatch(paths config.Paths, home, executable string) bool {
 }
 
 func schedulerFileContentMatches(name, content, executable, stateDir string) bool {
-	containsAll := func(values ...string) bool {
-		for _, value := range values {
-			if !strings.Contains(content, value) {
-				return false
+	quoted := func(value string) string { return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"` }
+	line := func(expected string) bool {
+		for _, value := range strings.Split(content, "\n") {
+			if strings.TrimSpace(value) == expected {
+				return true
 			}
 		}
-		return true
+		return false
 	}
 	switch name {
 	case "io.tooltend.reconcile.plist":
-		return containsAll("reconcile", "--once", "--state-dir", filepath.Base(executable), filepath.Base(stateDir), "<key>PATH</key>")
+		args, ok := plistArray(content, "ProgramArguments")
+		stdout, stdoutOK := plistString(content, "StandardOutPath")
+		stderr, stderrOK := plistString(content, "StandardErrorPath")
+		_, pathOK := plistString(content, "PATH")
+		return ok && pathOK && stdoutOK && stderrOK && slices.Equal(args, []string{executable, "reconcile", "--once", "--state-dir", stateDir, "--json"}) &&
+			stdout == filepath.Join(stateDir, "logs", "reconcile.stdout.log") && stderr == filepath.Join(stateDir, "logs", "reconcile.stderr.log")
+	case "io.tooltend.watchdog.plist":
+		args, ok := plistArray(content, "ProgramArguments")
+		stdout, stdoutOK := plistString(content, "StandardOutPath")
+		stderr, stderrOK := plistString(content, "StandardErrorPath")
+		_, pathOK := plistString(content, "PATH")
+		return ok && pathOK && stdoutOK && stderrOK && slices.Equal(args, []string{executable, "watchdog", "--max-age", "2h", "--state-dir", stateDir, "--json"}) &&
+			stdout == filepath.Join(stateDir, "logs", "watchdog.stdout.log") && stderr == filepath.Join(stateDir, "logs", "watchdog.stderr.log")
 	case "tooltend-reconcile.service":
-		return containsAll("reconcile", "--once", "--state-dir", filepath.Base(executable), filepath.Base(stateDir), `Environment="PATH=`)
+		return strings.Contains(content, `Environment="PATH=`) && line("ExecStart="+quoted(executable)+" reconcile --once --state-dir "+quoted(stateDir)+" --json")
+	case "tooltend-watchdog.service":
+		return strings.Contains(content, `Environment="PATH=`) && line("ExecStart="+quoted(executable)+" watchdog --max-age 3h --state-dir "+quoted(stateDir)+" --json")
 	case "tooltend-reconcile.timer":
-		return containsAll("[Timer]", "OnCalendar=*-*-* ", "RandomizedDelaySec=1h", "Persistent=true", "[Install]", "WantedBy=timers.target")
+		return timerFileContentMatches(content)
+	case "tooltend-watchdog.timer":
+		return timerFileContentMatches(content)
 	default:
 		return false
 	}
 }
 
+func timerFileContentMatches(content string) bool {
+	for _, value := range []string{"[Timer]", "OnCalendar=*-*-* ", "RandomizedDelaySec=1h", "Persistent=true", "[Install]", "WantedBy=timers.target"} {
+		if !strings.Contains(content, value) {
+			return false
+		}
+	}
+	return true
+}
+
+func plistArray(content, target string) ([]string, bool) {
+	decoder := xml.NewDecoder(strings.NewReader(content))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, false
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "key" {
+			continue
+		}
+		var key string
+		if err := decoder.DecodeElement(&key, &start); err != nil || key != target {
+			continue
+		}
+		for {
+			token, err = decoder.Token()
+			if err != nil {
+				return nil, false
+			}
+			array, ok := token.(xml.StartElement)
+			if !ok {
+				continue
+			}
+			if array.Name.Local != "array" {
+				return nil, false
+			}
+			var values []string
+			for {
+				token, err = decoder.Token()
+				if err != nil {
+					return nil, false
+				}
+				switch value := token.(type) {
+				case xml.StartElement:
+					if value.Name.Local != "string" {
+						return nil, false
+					}
+					var text string
+					if err := decoder.DecodeElement(&text, &value); err != nil {
+						return nil, false
+					}
+					values = append(values, text)
+				case xml.EndElement:
+					if value.Name.Local == "array" {
+						return values, true
+					}
+				}
+			}
+		}
+	}
+}
+
+func plistString(content, target string) (string, bool) {
+	decoder := xml.NewDecoder(strings.NewReader(content))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", false
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "key" {
+			continue
+		}
+		var key string
+		if err := decoder.DecodeElement(&key, &start); err != nil || key != target {
+			continue
+		}
+		for {
+			token, err = decoder.Token()
+			if err != nil {
+				return "", false
+			}
+			value, ok := token.(xml.StartElement)
+			if !ok {
+				continue
+			}
+			if value.Name.Local != "string" {
+				return "", false
+			}
+			var text string
+			if err := decoder.DecodeElement(&text, &value); err != nil {
+				return "", false
+			}
+			return text, true
+		}
+	}
+}
+
+func launchdLastExitCode(output string) (int, bool) {
+	for _, line := range strings.Split(output, "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "last exit code =")
+		if !ok {
+			continue
+		}
+		code, err := strconv.Atoi(strings.TrimSpace(value))
+		return code, err == nil
+	}
+	return 0, false
+}
+
 func schedulerPaths(paths config.Paths, home string) []string {
 	switch runtime.GOOS {
 	case "darwin":
-		return []string{filepath.Join(home, "Library", "LaunchAgents", "io.tooltend.reconcile.plist")}
+		return []string{
+			filepath.Join(home, "Library", "LaunchAgents", "io.tooltend.reconcile.plist"),
+			filepath.Join(home, "Library", "LaunchAgents", "io.tooltend.watchdog.plist"),
+		}
 	case "linux":
 		root := filepath.Join(home, ".config", "systemd", "user")
-		return []string{filepath.Join(root, "tooltend-reconcile.service"), filepath.Join(root, "tooltend-reconcile.timer")}
+		return []string{
+			filepath.Join(root, "tooltend-reconcile.service"), filepath.Join(root, "tooltend-reconcile.timer"),
+			filepath.Join(root, "tooltend-watchdog.service"), filepath.Join(root, "tooltend-watchdog.timer"),
+		}
 	default:
 		return nil
+	}
+}
+
+func checkReconcileRun(ctx context.Context, database *store.Store, interval time.Duration, now time.Time) Check {
+	value, err := database.LatestReconcileRun(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Check{Name: "reconcile_run", Level: LevelWarning, Message: "scheduled reconciliation has not completed yet"}
+	}
+	if err != nil {
+		return Check{Name: "reconcile_run", Level: LevelError, Message: "scheduled reconciliation history cannot be inspected"}
+	}
+	switch value.Status {
+	case "failed":
+		return Check{Name: "reconcile_run", Level: LevelError, Message: "the latest reconciliation failed with code " + value.ErrorCode}
+	case "running":
+		if now.Sub(value.StartedAt) > 15*time.Minute {
+			return Check{Name: "reconcile_run", Level: LevelError, Message: "the latest reconciliation appears stuck"}
+		}
+		return Check{Name: "reconcile_run", Level: LevelOK, Message: "reconciliation is currently running"}
+	case "incomplete":
+		return Check{Name: "reconcile_run", Level: LevelWarning, Message: "the latest reconciliation is waiting for a retry"}
+	case "succeeded":
+		if value.FinishedAt == nil {
+			return Check{Name: "reconcile_run", Level: LevelError, Message: "the latest reconciliation has an invalid completion record"}
+		}
+		if interval <= 0 {
+			interval = 24 * time.Hour
+		}
+		if now.Sub(*value.FinishedAt) > interval+2*time.Hour {
+			return Check{Name: "reconcile_run", Level: LevelWarning, Message: "the latest successful reconciliation is stale"}
+		}
+		return Check{Name: "reconcile_run", Level: LevelOK, Message: "the latest reconciliation completed successfully"}
+	default:
+		return Check{Name: "reconcile_run", Level: LevelError, Message: "the latest reconciliation has an invalid status"}
 	}
 }
 
@@ -304,7 +484,7 @@ func RepairPlan(paths config.Paths) plan.Plan {
 					if err := paths.Ensure(); err != nil {
 						return err
 					}
-					for _, dir := range []string{paths.ConfigDir, paths.StateDir, paths.DataDir, paths.ObjectsDir, paths.StagingDir, paths.GenerationsDir, paths.RuntimesDir} {
+					for _, dir := range []string{paths.ConfigDir, paths.StateDir, paths.LogsDir, paths.DataDir, paths.ObjectsDir, paths.StagingDir, paths.GenerationsDir, paths.RuntimesDir} {
 						if err := os.Chmod(dir, 0o700); err != nil {
 							return err
 						}

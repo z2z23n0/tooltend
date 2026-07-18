@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/z2z23n0/tooltend/internal/execx"
 	"github.com/z2z23n0/tooltend/internal/safeio"
@@ -23,8 +24,9 @@ type File struct {
 }
 
 type Plan struct {
-	Platform string `json:"platform"`
-	Files    []File `json:"files"`
+	Platform    string   `json:"platform"`
+	Files       []File   `json:"files"`
+	Directories []string `json:"directories,omitempty"`
 }
 
 type Options struct {
@@ -45,13 +47,18 @@ func BuildPlan(options Options) (Plan, error) {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		path := filepath.Join(options.Home, "Library", "LaunchAgents", "io.tooltend.reconcile.plist")
-		return Plan{Platform: "launchd", Files: []File{{Path: path, Content: []byte(renderLaunchd(options)), Mode: 0o600}}}, nil
+		root := filepath.Join(options.Home, "Library", "LaunchAgents")
+		return Plan{Platform: "launchd", Directories: []string{filepath.Join(options.StateDir, "logs")}, Files: []File{
+			{Path: filepath.Join(root, "io.tooltend.reconcile.plist"), Content: []byte(renderLaunchd(options)), Mode: 0o600},
+			{Path: filepath.Join(root, "io.tooltend.watchdog.plist"), Content: []byte(renderLaunchdWatchdog(options)), Mode: 0o600},
+		}}, nil
 	case "linux":
 		root := filepath.Join(options.Home, ".config", "systemd", "user")
 		return Plan{Platform: "systemd", Files: []File{
 			{Path: filepath.Join(root, "tooltend-reconcile.service"), Content: []byte(renderSystemdService(options)), Mode: 0o600},
 			{Path: filepath.Join(root, "tooltend-reconcile.timer"), Content: []byte(renderSystemdTimer(options)), Mode: 0o600},
+			{Path: filepath.Join(root, "tooltend-watchdog.service"), Content: []byte(renderSystemdWatchdogService(options)), Mode: 0o600},
+			{Path: filepath.Join(root, "tooltend-watchdog.timer"), Content: []byte(renderSystemdWatchdogTimer(options)), Mode: 0o600},
 		}}, nil
 	default:
 		return Plan{}, fmt.Errorf("daily scheduling is not supported on %s", runtime.GOOS)
@@ -59,6 +66,14 @@ func BuildPlan(options Options) (Plan, error) {
 }
 
 func Apply(plan Plan) error {
+	for _, directory := range plan.Directories {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(directory, 0o700); err != nil {
+			return err
+		}
+	}
 	for _, file := range plan.Files {
 		if err := safeio.AtomicWriteFile(file.Path, file.Content, file.Mode); err != nil {
 			return err
@@ -76,25 +91,27 @@ func Activate(ctx context.Context, schedule Plan, runner execx.Runner) error {
 	}
 	switch schedule.Platform {
 	case "launchd":
-		if len(schedule.Files) != 1 || filepath.Base(schedule.Files[0].Path) != "io.tooltend.reconcile.plist" {
+		if !hasExactFiles(schedule.Files, "io.tooltend.reconcile.plist", "io.tooltend.watchdog.plist") {
 			return errors.New("scheduler: invalid launchd plan")
 		}
 		domain := "gui/" + strconv.Itoa(os.Getuid())
-		// bootout is intentionally best-effort: a first installation has no
-		// existing job, while a repair must replace an already loaded plist.
-		_, _ = runner.Run(ctx, "launchctl", "bootout", domain, schedule.Files[0].Path)
-		if _, err := runner.Run(ctx, "launchctl", "bootstrap", domain, schedule.Files[0].Path); err != nil {
-			return fmt.Errorf("scheduler: activate launchd job: %w", err)
+		for _, file := range schedule.Files {
+			// bootout is intentionally best-effort: a first installation has no
+			// existing job, while a repair must replace an already loaded plist.
+			_, _ = runner.Run(ctx, "launchctl", "bootout", domain, file.Path)
+			if _, err := runner.Run(ctx, "launchctl", "bootstrap", domain, file.Path); err != nil {
+				return fmt.Errorf("scheduler: activate launchd job: %w", err)
+			}
 		}
 		return nil
 	case "systemd":
-		if len(schedule.Files) != 2 {
+		if !hasExactFiles(schedule.Files, "tooltend-reconcile.service", "tooltend-reconcile.timer", "tooltend-watchdog.service", "tooltend-watchdog.timer") {
 			return errors.New("scheduler: invalid systemd plan")
 		}
 		if _, err := runner.Run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
 			return fmt.Errorf("scheduler: reload systemd user units: %w", err)
 		}
-		if _, err := runner.Run(ctx, "systemctl", "--user", "enable", "--now", "tooltend-reconcile.timer"); err != nil {
+		if _, err := runner.Run(ctx, "systemctl", "--user", "enable", "--now", "tooltend-reconcile.timer", "tooltend-watchdog.timer"); err != nil {
 			return fmt.Errorf("scheduler: activate systemd timer: %w", err)
 		}
 		return nil
@@ -112,18 +129,45 @@ func Deactivate(ctx context.Context, schedule Plan, runner execx.Runner) error {
 	}
 	switch schedule.Platform {
 	case "launchd":
-		if len(schedule.Files) != 1 {
+		if !hasExactFiles(schedule.Files, "io.tooltend.reconcile.plist", "io.tooltend.watchdog.plist") {
 			return errors.New("scheduler: invalid launchd plan")
 		}
 		domain := "gui/" + strconv.Itoa(os.Getuid())
-		_, err := runner.Run(ctx, "launchctl", "bootout", domain, schedule.Files[0].Path)
-		return err
+		var result error
+		for _, file := range schedule.Files {
+			_, err := runner.Run(ctx, "launchctl", "bootout", domain, file.Path)
+			if filepath.Base(file.Path) == "io.tooltend.reconcile.plist" {
+				result = errors.Join(result, err)
+			}
+		}
+		return result
 	case "systemd":
-		_, err := runner.Run(ctx, "systemctl", "--user", "disable", "--now", "tooltend-reconcile.timer")
+		if !hasExactFiles(schedule.Files, "tooltend-reconcile.service", "tooltend-reconcile.timer", "tooltend-watchdog.service", "tooltend-watchdog.timer") {
+			return errors.New("scheduler: invalid systemd plan")
+		}
+		_, err := runner.Run(ctx, "systemctl", "--user", "disable", "--now", "tooltend-reconcile.timer", "tooltend-watchdog.timer")
 		return err
 	default:
 		return fmt.Errorf("scheduler: unsupported plan platform %q", schedule.Platform)
 	}
+}
+
+func hasExactFiles(files []File, names ...string) bool {
+	if len(files) != len(names) {
+		return false
+	}
+	expected := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		expected[name] = struct{}{}
+	}
+	for _, file := range files {
+		name := filepath.Base(file.Path)
+		if _, ok := expected[name]; !ok {
+			return false
+		}
+		delete(expected, name)
+	}
+	return len(expected) == 0
 }
 
 func randomDailyTime() (int, int) {
@@ -137,7 +181,18 @@ func randomDailyTime() (int, int) {
 
 func renderLaunchd(options Options) string {
 	args := []string{options.Executable, "reconcile", "--once", "--state-dir", options.StateDir, "--json"}
+	return renderLaunchdJob("io.tooltend.reconcile", args, options, options.Hour, options.Minute, "reconcile")
+}
+
+func renderLaunchdWatchdog(options Options) string {
+	hour, minute := watchdogTime(options.Hour, options.Minute)
+	args := []string{options.Executable, "watchdog", "--max-age", "2h", "--state-dir", options.StateDir, "--json"}
+	return renderLaunchdJob("io.tooltend.watchdog", args, options, hour, minute, "watchdog")
+}
+
+func renderLaunchdJob(label string, args []string, options Options, hour, minute int, logName string) string {
 	pathEnv := workerPATH(options.Executable, options.PathEnv)
+	logsDir := filepath.Join(options.StateDir, "logs")
 	var program strings.Builder
 	for _, arg := range args {
 		program.WriteString("      <string>")
@@ -148,7 +203,7 @@ func renderLaunchd(options Options) string {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>io.tooltend.reconcile</string>
+  <key>Label</key><string>` + xmlEscape(label) + `</string>
   <key>ProgramArguments</key>
   <array>
 ` + program.String() + `  </array>
@@ -158,13 +213,13 @@ func renderLaunchd(options Options) string {
   </dict>
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key><integer>` + strconv.Itoa(options.Hour) + `</integer>
-    <key>Minute</key><integer>` + strconv.Itoa(options.Minute) + `</integer>
+    <key>Hour</key><integer>` + strconv.Itoa(hour) + `</integer>
+    <key>Minute</key><integer>` + strconv.Itoa(minute) + `</integer>
   </dict>
   <key>ProcessType</key><string>Background</string>
   <key>LowPriorityIO</key><true/>
-  <key>StandardOutPath</key><string>/dev/null</string>
-  <key>StandardErrorPath</key><string>/dev/null</string>
+  <key>StandardOutPath</key><string>` + xmlEscape(filepath.Join(logsDir, logName+".stdout.log")) + `</string>
+  <key>StandardErrorPath</key><string>` + xmlEscape(filepath.Join(logsDir, logName+".stderr.log")) + `</string>
 </dict>
 </plist>
 `
@@ -178,6 +233,17 @@ Description=ToolTend one-shot reconciliation
 Type=oneshot
 Environment=` + systemdQuote("PATH="+workerPATH(options.Executable, options.PathEnv)) + `
 ExecStart=` + systemdQuote(options.Executable) + ` reconcile --once --state-dir ` + systemdQuote(options.StateDir) + ` --json
+`
+}
+
+func renderSystemdWatchdogService(options Options) string {
+	return `[Unit]
+Description=Check ToolTend scheduled reconciliation
+
+[Service]
+Type=oneshot
+Environment=` + systemdQuote("PATH="+workerPATH(options.Executable, options.PathEnv)) + `
+ExecStart=` + systemdQuote(options.Executable) + ` watchdog --max-age 3h --state-dir ` + systemdQuote(options.StateDir) + ` --json
 `
 }
 
@@ -208,17 +274,35 @@ func workerPATH(executable, current string) string {
 }
 
 func renderSystemdTimer(options Options) string {
+	return renderSystemdTimerAt("Run ToolTend reconciliation daily", options.Hour, options.Minute)
+}
+
+func renderSystemdWatchdogTimer(options Options) string {
+	hour, minute := timeAfter(options.Hour, options.Minute, 2*time.Hour)
+	return renderSystemdTimerAt("Check ToolTend reconciliation daily", hour, minute)
+}
+
+func renderSystemdTimerAt(description string, hour, minute int) string {
 	return `[Unit]
-Description=Run ToolTend reconciliation daily
+Description=` + description + `
 
 [Timer]
-OnCalendar=*-*-* ` + fmt.Sprintf("%02d:%02d:00", options.Hour, options.Minute) + `
+OnCalendar=*-*-* ` + fmt.Sprintf("%02d:%02d:00", hour, minute) + `
 RandomizedDelaySec=1h
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 `
+}
+
+func watchdogTime(hour, minute int) (int, int) {
+	return timeAfter(hour, minute, time.Hour)
+}
+
+func timeAfter(hour, minute int, offset time.Duration) (int, int) {
+	minutes := (hour*60 + minute + int(offset/time.Minute)) % (24 * 60)
+	return minutes / 60, minutes % 60
 }
 
 func systemdQuote(value string) string {

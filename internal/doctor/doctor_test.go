@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/z2z23n0/tooltend/internal/config"
 	"github.com/z2z23n0/tooltend/internal/execx"
 	"github.com/z2z23n0/tooltend/internal/model"
 	"github.com/z2z23n0/tooltend/internal/plan"
+	"github.com/z2z23n0/tooltend/internal/store"
 )
 
 type fakeRunner struct{ calls int }
@@ -86,12 +88,31 @@ Type=oneshot
 Environment="PATH=/opt/tooltend/bin:/usr/bin:/bin"
 ExecStart="/opt/tooltend/bin/tooltend" reconcile --once --state-dir "/var/lib/tooltend-state" --json
 `
+	watchdogService := `[Unit]
+Description=Check ToolTend scheduled reconciliation
+
+[Service]
+Type=oneshot
+Environment="PATH=/opt/tooltend/bin:/usr/bin:/bin"
+ExecStart="/opt/tooltend/bin/tooltend" watchdog --max-age 3h --state-dir "/var/lib/tooltend-state" --json
+`
 	plist := `<plist><dict>
 <key>ProgramArguments</key><array>
 <string>/opt/tooltend/bin/tooltend</string><string>reconcile</string><string>--once</string>
-<string>--state-dir</string><string>/var/lib/tooltend-state</string>
+<string>--state-dir</string><string>/var/lib/tooltend-state</string><string>--json</string>
 </array>
 <key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/tooltend/bin:/usr/bin:/bin</string></dict>
+<key>StandardOutPath</key><string>/var/lib/tooltend-state/logs/reconcile.stdout.log</string>
+<key>StandardErrorPath</key><string>/var/lib/tooltend-state/logs/reconcile.stderr.log</string>
+</dict></plist>`
+	watchdogPlist := `<plist><dict>
+<key>ProgramArguments</key><array>
+<string>/opt/tooltend/bin/tooltend</string><string>watchdog</string><string>--max-age</string><string>2h</string>
+<string>--state-dir</string><string>/var/lib/tooltend-state</string><string>--json</string>
+</array>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/tooltend/bin:/usr/bin:/bin</string></dict>
+<key>StandardOutPath</key><string>/var/lib/tooltend-state/logs/watchdog.stdout.log</string>
+<key>StandardErrorPath</key><string>/var/lib/tooltend-state/logs/watchdog.stderr.log</string>
 </dict></plist>`
 	timer := `[Unit]
 Description=Run ToolTend reconciliation daily
@@ -113,8 +134,11 @@ WantedBy=timers.target
 		want     bool
 	}{
 		{name: "plist", file: "io.tooltend.reconcile.plist", content: plist, exe: executable, stateDir: stateDir, want: true},
+		{name: "watchdog plist", file: "io.tooltend.watchdog.plist", content: watchdogPlist, exe: executable, stateDir: stateDir, want: true},
 		{name: "plist missing path", file: "io.tooltend.reconcile.plist", content: strings.Replace(plist, "<key>PATH</key>", "<key>OLD_PATH</key>", 1), exe: executable, stateDir: stateDir},
+		{name: "plist wrong argv prefix", file: "io.tooltend.reconcile.plist", content: strings.Replace(plist, "<string>/opt/tooltend/bin/tooltend</string>", "<string>/opt/tooltend/bin/tooltend-bundle-driver</string><string>/opt/tooltend/bin/tooltend</string>", 1), exe: executable, stateDir: stateDir},
 		{name: "service", file: "tooltend-reconcile.service", content: service, exe: executable, stateDir: stateDir, want: true},
+		{name: "watchdog service", file: "tooltend-watchdog.service", content: watchdogService, exe: executable, stateDir: stateDir, want: true},
 		{name: "timer", file: "tooltend-reconcile.timer", content: timer, exe: executable, stateDir: stateDir, want: true},
 		{name: "timer missing calendar", file: "tooltend-reconcile.timer", content: strings.Replace(timer, "OnCalendar=", "Calendar=", 1), exe: executable, stateDir: stateDir},
 		{name: "timer missing persistence", file: "tooltend-reconcile.timer", content: strings.Replace(timer, "Persistent=true", "Persistent=false", 1), exe: executable, stateDir: stateDir},
@@ -130,6 +154,31 @@ WantedBy=timers.target
 				t.Fatalf("schedulerFileContentMatches()=%v want=%v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestLaunchdLastExitCode(t *testing.T) {
+	code, ok := launchdLastExitCode("state = not running\n\tlast exit code = 17\n")
+	if !ok || code != 17 {
+		t.Fatalf("code=%d ok=%v", code, ok)
+	}
+}
+
+func TestReconcileRunCheckReportsFailureAndStaleness(t *testing.T) {
+	database, err := store.OpenRW(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 7, 18, 20, 0, 0, 0, time.UTC)
+	if check := checkReconcileRun(context.Background(), database, 24*time.Hour, now); check.Level != LevelWarning {
+		t.Fatalf("missing check = %#v", check)
+	}
+	if _, err := database.DB().Exec(`INSERT INTO reconcile_runs(id,reason,status,started_at,finished_at,error_code,summary_json) VALUES('run','scheduled','failed',?,?, 'task_failed','{}')`, now.Add(-time.Hour).Format(time.RFC3339Nano), now.Add(-59*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if check := checkReconcileRun(context.Background(), database, 24*time.Hour, now); check.Level != LevelError || !strings.Contains(check.Message, "task_failed") {
+		t.Fatalf("failed check = %#v", check)
 	}
 }
 
