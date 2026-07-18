@@ -97,6 +97,7 @@ func Discover(ctx context.Context, database *store.Store, options DiscoverOption
 					match := matchedFromObserved(*item, artifact, options.HomeDir)
 					enrichSkillMatch(&match, *item, skillEvidence)
 					enrichWorkspaceMatch(&match, *item)
+					enrichRecipeSource(&match, artifact)
 					matches[artifact.Key] = append(matches[artifact.Key], match)
 					matchedBindings[item.binding.ID] = struct{}{}
 				}
@@ -104,8 +105,16 @@ func Discover(ctx context.Context, database *store.Store, options DiscoverOption
 			for _, probe := range artifact.Probes {
 				match, ok := resolveProbe(ctx, probe, recipe, artifact, options, lookup)
 				if ok {
+					enrichRecipeSource(&match, artifact)
 					matches[artifact.Key] = append(matches[artifact.Key], match)
 				}
+			}
+			if artifact.Driver == "mainline-hooks" {
+				hookMatches, hookErr := discoverMainlineHooks(ctx, database)
+				if hookErr != nil {
+					return DiscoverResult{}, hookErr
+				}
+				matches[artifact.Key] = append(matches[artifact.Key], hookMatches...)
 			}
 			matches[artifact.Key] = dedupeMatches(matches[artifact.Key])
 		}
@@ -586,6 +595,50 @@ func enrichWorkspaceMatch(match *matchedInstallation, observed observedInstallat
 			match.hash = commit
 		}
 	}
+}
+
+func enrichRecipeSource(match *matchedInstallation, artifact ArtifactRecipe) {
+	if strings.TrimSpace(artifact.Source) == "" {
+		return
+	}
+	match.sourceIdentity = strings.TrimSpace(artifact.Source)
+	if artifact.Subdir != "" {
+		match.sourceIdentity += "#" + filepath.ToSlash(filepath.Clean(artifact.Subdir))
+	}
+	match.metadata["recipe_source_url"] = strings.TrimSpace(artifact.Source)
+	if artifact.Subdir != "" {
+		match.metadata["recipe_source_subdir"] = filepath.ToSlash(filepath.Clean(artifact.Subdir))
+	}
+}
+
+func discoverMainlineHooks(ctx context.Context, database *store.Store) ([]matchedInstallation, error) {
+	projects, err := database.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var result []matchedInstallation
+	for _, project := range projects {
+		if !project.Selected {
+			continue
+		}
+		root := filepath.Clean(project.RootPath)
+		if info, statErr := os.Stat(filepath.Join(root, ".mainline", "config.toml")); statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		digest := sha256.New()
+		for _, relative := range []string{".claude/settings.json", ".codex/config.toml", ".codex/hooks.json", ".cursor/hooks.json"} {
+			data, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
+			if readErr == nil {
+				_, _ = digest.Write([]byte(relative + "\x00"))
+				_, _ = digest.Write(data)
+			}
+		}
+		result = append(result, matchedInstallation{
+			path: root, packageIdentity: "mainline-hooks", sourceIdentity: "mainline-hooks:" + root,
+			hash: hex.EncodeToString(digest.Sum(nil)), metadata: map[string]any{"project_id": project.ID, "derived": true},
+		})
+	}
+	return result, nil
 }
 
 func inspectSignedSkillManifest(skillPath string) (string, bool, bool) {

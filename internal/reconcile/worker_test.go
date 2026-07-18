@@ -145,6 +145,10 @@ func TestRunOnceStoresOnlyCodedFailureAndRetries(t *testing.T) {
 	if first.Retried != 1 || first.Failed != 0 {
 		t.Fatalf("unexpected retry result: %#v", first)
 	}
+	firstRun, err := database.LatestReconcileRun(ctx)
+	if err != nil || firstRun.Status != "incomplete" || firstRun.ErrorCode != "retry_pending" {
+		t.Fatalf("retry run = %#v err=%v", firstRun, err)
+	}
 	var code, summary, status string
 	if err := database.DB().QueryRow(`SELECT error_code,error_summary,status FROM tasks WHERE binding_id='retry'`).Scan(&code, &summary, &status); err != nil {
 		t.Fatal(err)
@@ -164,6 +168,65 @@ func TestRunOnceStoresOnlyCodedFailureAndRetries(t *testing.T) {
 	}
 	if second.Succeeded != 1 || attempts != 2 {
 		t.Fatalf("retry did not finish: %#v attempts=%d", second, attempts)
+	}
+}
+
+func TestRunOnceRecordsAndNotifiesTerminalBundleFailure(t *testing.T) {
+	ctx := context.Background()
+	database, paths := openWorkerStore(t)
+	now := time.Date(2026, 7, 18, 3, 0, 0, 0, time.UTC)
+	bundleValue := model.Bundle{
+		ID: "bundle-mainline", Slug: "mainline", Name: "Mainline", RecipeID: "mainline", RecipeVersion: "1",
+		RecipeSource: "local", Owner: model.LifecycleDelegated, ConfigState: model.BundleUnconfigured,
+		Confidence: model.BundleConfidenceHigh, MetadataJSON: `{}`, DiscoveredAt: now, LastSeenAt: now,
+	}
+	if err := database.UpsertBundle(ctx, bundleValue); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ConfigureBundle(ctx, model.BundlePolicy{BundleID: bundleValue.ID, Mode: model.BundlePolicyAuto, RecipeTrusted: true, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	worker := Worker{
+		Database: database, Paths: paths, Config: config.Default(), Now: func() time.Time { return now },
+		Recover: func(context.Context, *store.Store, config.Paths) (int, error) { return 0, nil },
+		Inventory: func(context.Context, *store.Store, InventoryOptions) (inventory.PersistResult, error) {
+			return inventory.PersistResult{}, nil
+		},
+		Coordinator: CoordinatorFunc(func(context.Context, Request) (Outcome, error) {
+			return Outcome{}, nil
+		}),
+		BundleCoordinator: BundleCoordinatorFunc(func(context.Context, model.Bundle, model.BundlePolicy, bool) error {
+			return NewCodedError("release_manifest_invalid", false)
+		}),
+	}
+	result, err := worker.RunOnce(ctx, ReasonScheduled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Failed != 1 || len(result.Failures) != 1 || result.Failures[0].BundleID != bundleValue.ID || !result.FailureNotificationQueued {
+		t.Fatalf("result = %#v", result)
+	}
+	run, err := database.LatestReconcileRun(ctx)
+	if err != nil || run.Status != "failed" || run.ErrorCode != "task_failed" {
+		t.Fatalf("run = %#v err=%v", run, err)
+	}
+	var bundleMessages, runMessages int
+	if err := database.DB().QueryRow(`SELECT COUNT(*) FROM notifications WHERE message LIKE 'Bundle Mainline%'`).Scan(&bundleMessages); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB().QueryRow(`SELECT COUNT(*) FROM notifications WHERE message LIKE 'ToolTend scheduled update failed%'`).Scan(&runMessages); err != nil {
+		t.Fatal(err)
+	}
+	if bundleMessages != 1 || runMessages != 1 {
+		t.Fatalf("bundle notifications=%d run notifications=%d", bundleMessages, runMessages)
+	}
+	second, err := worker.RunOnce(ctx, ReasonKick)
+	if err != nil || second.Failed != 1 || second.FailureNotificationQueued {
+		t.Fatalf("failed task was hidden by idempotent rerun: result=%#v err=%v", second, err)
+	}
+	var notifications int
+	if err := database.DB().QueryRow(`SELECT COUNT(*) FROM notifications`).Scan(&notifications); err != nil || notifications != 2 {
+		t.Fatalf("notifications=%d err=%v", notifications, err)
 	}
 }
 
@@ -207,6 +270,10 @@ func TestRunOnceNonBlockingLockLeavesActiveMarker(t *testing.T) {
 	}
 	if !result.AlreadyRunning {
 		t.Fatalf("expected non-blocking lock result: %#v", result)
+	}
+	run, err := database.LatestReconcileRun(context.Background())
+	if err != nil || run.Status != "incomplete" || run.ErrorCode != "already_running" {
+		t.Fatalf("run = %#v err=%v", run, err)
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("active worker marker was cleared: %v", err)

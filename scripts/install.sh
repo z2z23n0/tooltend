@@ -22,6 +22,12 @@ chmod 0755 "$tmp"
 mv -f "$tmp" "$INSTALL_DIR/tooltend"
 trap - EXIT
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  if ! "$INSTALL_DIR/tooltend" __notifier install; then
+    echo "ToolTend was installed, but macOS notifications need Xcode Command Line Tools. Install them and run: tooltend __notifier install" >&2
+  fi
+fi
+
 echo "Installed tooltend to $INSTALL_DIR/tooltend"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

@@ -17,19 +17,20 @@ import (
 )
 
 type statusData struct {
-	Initialized         bool        `json:"initialized"`
-	Issues              []string    `json:"issues,omitempty"`
-	Bundles             int         `json:"bundles"`
-	ConfiguredBundles   int         `json:"configured_bundles"`
-	ManagedBundles      int         `json:"managed_bundles"`
-	ObservedBundles     int         `json:"observed_bundles"`
-	UnconfiguredBundles int         `json:"unconfigured_bundles"`
-	UnresolvedBundles   int         `json:"unresolved_bundles"`
-	UpdatesAvailable    int         `json:"updates_available"`
-	FailedTransactions  int         `json:"failed_transactions"`
-	PendingTasks        int         `json:"pending_tasks"`
-	UnfinishedActions   int         `json:"unfinished_transactions"`
-	Debug               statusDebug `json:"debug"`
+	Initialized         bool                `json:"initialized"`
+	Issues              []string            `json:"issues,omitempty"`
+	Bundles             int                 `json:"bundles"`
+	ConfiguredBundles   int                 `json:"configured_bundles"`
+	ManagedBundles      int                 `json:"managed_bundles"`
+	ObservedBundles     int                 `json:"observed_bundles"`
+	UnconfiguredBundles int                 `json:"unconfigured_bundles"`
+	UnresolvedBundles   int                 `json:"unresolved_bundles"`
+	UpdatesAvailable    int                 `json:"updates_available"`
+	FailedTransactions  int                 `json:"failed_transactions"`
+	PendingTasks        int                 `json:"pending_tasks"`
+	UnfinishedActions   int                 `json:"unfinished_transactions"`
+	LatestReconcile     *model.ReconcileRun `json:"latest_reconcile,omitempty"`
+	Debug               statusDebug         `json:"debug"`
 }
 
 type statusDebug struct {
@@ -101,6 +102,14 @@ func (a *App) newStatusCommand() *cobra.Command {
 			return statusData{Initialized: false, Issues: []string{"project_inventory_missing"}}, nil
 		}
 		result := statusData{Initialized: true}
+		if latest, latestErr := database.LatestReconcileRun(ctx); latestErr == nil {
+			result.LatestReconcile = &latest
+			if latest.Status == "failed" {
+				result.Issues = append(result.Issues, "latest_reconcile_failed")
+			}
+		} else if !errors.Is(latestErr, sql.ErrNoRows) {
+			return nil, latestErr
+		}
 		components, err := database.ListComponents(ctx)
 		if err != nil {
 			return nil, err

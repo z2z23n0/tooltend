@@ -22,9 +22,11 @@ import (
 	"github.com/z2z23n0/tooltend/internal/kick"
 	"github.com/z2z23n0/tooltend/internal/lifecycle"
 	"github.com/z2z23n0/tooltend/internal/model"
+	"github.com/z2z23n0/tooltend/internal/notify"
 	"github.com/z2z23n0/tooltend/internal/objectstore"
 	"github.com/z2z23n0/tooltend/internal/reconcile"
 	"github.com/z2z23n0/tooltend/internal/store"
+	"github.com/z2z23n0/tooltend/internal/watchdog"
 )
 
 type hookStore struct{ database *store.Store }
@@ -54,6 +56,10 @@ func (s hookStore) TakePending(ctx context.Context, limit int) ([]string, error)
 	}
 	result := make([]string, 0, len(values))
 	for _, value := range values {
+		if strings.TrimSpace(value.Message) != "" {
+			result = append(result, value.Message)
+			continue
+		}
 		hash := value.CandidateHash
 		if len(hash) > 12 {
 			hash = hash[:12]
@@ -117,7 +123,7 @@ func (a *App) reconcileDue(ctx context.Context, paths config.Paths, database *st
 		interval = cfg.Check.Interval
 	}
 	var latest sql.NullString
-	if err := database.DB().QueryRowContext(ctx, `SELECT max(finished_at) FROM scans WHERE status='succeeded'`).Scan(&latest); err != nil {
+	if err := database.DB().QueryRowContext(ctx, `SELECT max(finished_at) FROM reconcile_runs WHERE status='succeeded'`).Scan(&latest); err != nil {
 		return false
 	}
 	if !latest.Valid {
@@ -168,9 +174,81 @@ func (a *App) newReconcileCommand() *cobra.Command {
 		if a.global.DryRun {
 			return map[string]any{"dry_run": true, "reason": reason, "state_dir": paths.StateDir}, nil
 		}
-		return a.reconcileOnce(ctx, paths, reason)
+		value, runErr := a.reconcileOnce(ctx, paths, reason)
+		if reason == reconcile.ReasonScheduled {
+			a.notifyScheduledOutcome(ctx, paths, value, runErr)
+		}
+		return value, runErr
 	})
 	return command
+}
+
+func (a *App) newWatchdogCommand() *cobra.Command {
+	var maxAge time.Duration
+	command := &cobra.Command{Use: "watchdog", Short: "Alert when scheduled reconciliation does not complete", Hidden: true, Args: cobra.NoArgs}
+	command.Flags().DurationVar(&maxAge, "max-age", 2*time.Hour, "maximum age of the latest successful reconciliation")
+	command.RunE = a.run("watchdog", func(ctx context.Context) (any, error) {
+		if maxAge <= 0 {
+			return nil, cliError("invalid_argument", "watchdog max age must be positive", nil)
+		}
+		paths, err := a.paths()
+		if err != nil {
+			return nil, err
+		}
+		if a.global.DryRun {
+			return map[string]any{"dry_run": true, "max_age": maxAge.String(), "state_dir": paths.StateDir}, nil
+		}
+		desktop := a.desktopNotifier()
+		cfg, err := config.Load(paths.ConfigFile)
+		if err != nil {
+			a.sendDesktopNotification(ctx, "Scheduled update state cannot be checked. Run `tooltend doctor` for details.")
+			return nil, err
+		}
+		database, err := store.OpenRW(paths.DatabaseFile)
+		if err != nil {
+			a.sendDesktopNotification(ctx, "Scheduled update state cannot be opened. Run `tooltend doctor` for details.")
+			return nil, err
+		}
+		defer database.Close()
+		return (watchdog.Service{
+			Database: database,
+			Notifier: desktop,
+			Enabled:  cfg.Notify.Mode != model.NotifyNone,
+		}).Check(ctx, maxAge)
+	})
+	return command
+}
+
+func (a *App) notifyScheduledOutcome(ctx context.Context, paths config.Paths, value any, runErr error) {
+	cfg, cfgErr := config.Load(paths.ConfigFile)
+	if cfgErr == nil && cfg.Notify.Mode == model.NotifyNone {
+		return
+	}
+	message := ""
+	result, _ := value.(reconcile.RunResult)
+	switch {
+	case runErr != nil && (result.RunID == "" || result.FailureNotificationQueued || result.Failed > 0):
+		message = "Scheduled update failed before completion. Run `tooltend doctor` for details."
+	case result.Failed > 0 && result.FailureNotificationQueued:
+		message = fmt.Sprintf("Scheduled update failed: %d task(s) failed. Run `tooltend doctor` for details.", result.Failed)
+	case cfgErr == nil && cfg.Notify.Mode == model.NotifyAll && result.Succeeded > 0:
+		message = fmt.Sprintf("Scheduled update completed: %d task(s) succeeded.", result.Succeeded)
+	}
+	if message != "" {
+		a.sendDesktopNotification(ctx, message)
+	}
+}
+
+func (a *App) desktopNotifier() notify.Desktop {
+	return notify.Desktop{AppPath: notify.DarwinNotifierExecutable(a.home), Runner: a.runner}
+}
+
+func (a *App) sendDesktopNotification(ctx context.Context, message string) bool {
+	if err := a.desktopNotifier().Send(ctx, "ToolTend", message); err != nil {
+		_, _ = fmt.Fprintf(a.errOut, "Warning: desktop notification failed: %v\n", err)
+		return false
+	}
+	return true
 }
 
 func (a *App) reconcileOnce(ctx context.Context, paths config.Paths, reason string) (any, error) {
@@ -283,6 +361,9 @@ func (a *App) reconcileOnce(ctx context.Context, paths config.Paths, reason stri
 			preview, prepareErr := bundleService.PrepareUpdate(bundleCtx, value.ID, false)
 			if prepareErr != nil {
 				return prepareErr
+			}
+			if !preview.UpdateAvailable {
+				return nil
 			}
 			if !activate {
 				return database.UpsertBundleRelease(bundleCtx, preview.Target)

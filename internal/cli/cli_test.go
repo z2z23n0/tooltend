@@ -22,6 +22,8 @@ import (
 	"github.com/z2z23n0/tooltend/internal/inventory"
 	"github.com/z2z23n0/tooltend/internal/lockfile"
 	"github.com/z2z23n0/tooltend/internal/model"
+	"github.com/z2z23n0/tooltend/internal/notify"
+	"github.com/z2z23n0/tooltend/internal/reconcile"
 	"github.com/z2z23n0/tooltend/internal/store"
 )
 
@@ -31,7 +33,7 @@ func TestCommandTreeContainsCompleteV1Surface(t *testing.T) {
 		"init", "scan", "status", "components list", "components show", "policy set",
 		"bundles list", "bundles show", "bundles configure", "bundles update", "bundles rollback", "bundles history", "bundles doctor",
 		"update", "review", "history", "rollback", "adopt", "project init", "project export",
-		"project sync", "self status", "self update", "doctor", "hook", "kick", "reconcile", "version",
+		"project sync", "self status", "self update", "doctor", "hook", "kick", "reconcile", "watchdog", "version",
 	} {
 		if _, _, err := command.Find(strings.Fields(path)); err != nil {
 			t.Fatalf("missing command %q: %v", path, err)
@@ -147,7 +149,7 @@ func TestResetStateRestoresOldStateWhenSchedulerReactivationFails(t *testing.T) 
 	}
 	configHash := fileHashOrEmpty(paths.ConfigFile)
 	databaseHash := fileHashOrEmpty(paths.DatabaseFile)
-	runner.failAt = runner.calls + 3 // deactivate and best-effort bootout succeed; final registration fails once
+	runner.failAt = runner.calls + 4 // two deactivations and best-effort bootout succeed; final registration fails once
 	out.Reset()
 	command = New(options)
 	command.SetArgs([]string{"init", "--reset-state", "--yes", "--json"})
@@ -320,6 +322,47 @@ func TestComponentsListSeparatesActionableManagedAndCompleteInventory(t *testing
 type successfulRunner struct {
 	calls  int
 	failAt int
+}
+
+type notificationRunner struct {
+	name string
+	args []string
+}
+
+func (r *notificationRunner) Run(_ context.Context, name string, args ...string) (execx.Result, error) {
+	r.name, r.args = name, append([]string(nil), args...)
+	return execx.Result{}, nil
+}
+
+func TestScheduledFailureSendsDesktopNotification(t *testing.T) {
+	home := t.TempDir()
+	paths := config.ResolveWith(home, func(name string) string {
+		if name == config.EnvHome {
+			return filepath.Join(home, "tooltend")
+		}
+		return ""
+	})
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveAtomic(paths.ConfigFile, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	runner := &notificationRunner{}
+	a := newApp(Options{HomeDir: home, Runner: runner, Getenv: func(name string) string {
+		if name == config.EnvHome {
+			return filepath.Join(home, "tooltend")
+		}
+		return ""
+	}})
+	a.notifyScheduledOutcome(context.Background(), paths, reconcile.RunResult{Failed: 2, FailureNotificationQueued: true}, nil)
+	wantName := "notify-send"
+	if runtime.GOOS == "darwin" {
+		wantName = notify.DarwinNotifierExecutable(home)
+	}
+	if runner.name != wantName || !strings.Contains(strings.Join(runner.args, " "), "2 task(s) failed") {
+		t.Fatalf("notification call = %s %#v", runner.name, runner.args)
+	}
 }
 
 func (r *successfulRunner) Run(context.Context, string, ...string) (execx.Result, error) {

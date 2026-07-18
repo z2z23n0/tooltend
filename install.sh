@@ -63,6 +63,12 @@ if [[ -f "$target" && ! -L "$target" ]]; then
 fi
 mv -f "$binary" "$target"
 
+if [[ "$os_name" == "darwin" ]]; then
+  if ! "$target" __notifier install; then
+    echo "ToolTend was installed, but macOS notifications need Xcode Command Line Tools. Install them and run: tooltend __notifier install" >&2
+  fi
+fi
+
 echo "Installed tooltend to $target"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

@@ -627,12 +627,18 @@ func (s *Store) RecordHookEvent(ctx context.Context, value model.HookEvent) (int
 }
 
 func (s *Store) QueueNotification(ctx context.Context, value model.Notification) (bool, error) {
-	result, err := s.db.ExecContext(ctx, `INSERT INTO notifications(candidate_hash,kind,queued_at,shown_at) VALUES(?,?,?,?) ON CONFLICT(candidate_hash,kind) DO NOTHING`, value.CandidateHash, value.Kind, timeText(value.QueuedAt), nullableTimeText(value.ShownAt))
+	result, err := s.db.ExecContext(ctx, `INSERT INTO notifications(candidate_hash,kind,message,queued_at,shown_at) VALUES(?,?,?,?,?) ON CONFLICT(candidate_hash,kind) DO NOTHING`, value.CandidateHash, value.Kind, value.Message, timeText(value.QueuedAt), nullableTimeText(value.ShownAt))
 	if err != nil {
 		return false, err
 	}
 	count, err := result.RowsAffected()
 	return count == 1, err
+}
+
+func (s *Store) HasNotificationKindSince(ctx context.Context, kindPrefix string, since time.Time) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notifications WHERE kind LIKE ? AND queued_at>=?)`, kindPrefix+"%", timeText(since)).Scan(&exists)
+	return exists == 1, err
 }
 
 func (s *Store) TakeNotifications(ctx context.Context, limit int) ([]model.Notification, error) {
@@ -641,7 +647,7 @@ func (s *Store) TakeNotifications(ctx context.Context, limit int) ([]model.Notif
 	}
 	result := []model.Notification{}
 	err := s.WithTx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT candidate_hash,kind,queued_at FROM notifications WHERE shown_at IS NULL ORDER BY queued_at LIMIT ?`, limit)
+		rows, err := tx.QueryContext(ctx, `SELECT candidate_hash,kind,message,queued_at FROM notifications WHERE shown_at IS NULL ORDER BY queued_at LIMIT ?`, limit)
 		if err != nil {
 			return err
 		}
@@ -649,7 +655,7 @@ func (s *Store) TakeNotifications(ctx context.Context, limit int) ([]model.Notif
 		for rows.Next() {
 			var value model.Notification
 			var queued string
-			if err := rows.Scan(&value.CandidateHash, &value.Kind, &queued); err != nil {
+			if err := rows.Scan(&value.CandidateHash, &value.Kind, &value.Message, &queued); err != nil {
 				return err
 			}
 			value.QueuedAt, err = parseTime(queued)

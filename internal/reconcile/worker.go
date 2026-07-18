@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -60,6 +61,75 @@ type Worker struct {
 }
 
 func (w *Worker) RunOnce(ctx context.Context, reason string) (RunResult, error) {
+	if err := w.validate(); err != nil {
+		return RunResult{}, err
+	}
+	reason = normalizeReason(reason)
+	started := w.now()
+	runID, err := model.NewID("run")
+	if err != nil {
+		return RunResult{}, err
+	}
+	if err := w.Database.BeginReconcileRun(ctx, model.ReconcileRun{ID: runID, Reason: reason, Status: "running", StartedAt: started}); err != nil {
+		return RunResult{}, fmt.Errorf("reconcile: begin run: %w", err)
+	}
+
+	result, runErr := w.runOnce(ctx, reason)
+	result.RunID = runID
+	status, errorCode := "succeeded", ""
+	if result.AlreadyRunning {
+		status, errorCode = "incomplete", "already_running"
+	} else if runErr != nil {
+		status, errorCode = "failed", "reconcile_failed"
+		if code, _ := classifyError(runErr); code != "" {
+			errorCode = code
+		}
+	} else if result.Failed > 0 {
+		status, errorCode = "failed", "task_failed"
+	} else if result.Retried > 0 {
+		status, errorCode = "incomplete", "retry_pending"
+	}
+	summary, _ := json.Marshal(map[string]int{
+		"scheduled": result.Scheduled,
+		"succeeded": result.Succeeded,
+		"retried":   result.Retried,
+		"failed":    result.Failed,
+		"skipped":   result.Skipped,
+	})
+	finished := w.now()
+	result.FinishedAt = finished
+	finishErr := w.Database.FinishReconcileRun(ctx, runID, status, errorCode, string(summary), finished)
+	var notificationErr error
+	if status == "failed" && w.Config.Notify.Mode != model.NotifyNone {
+		message := "ToolTend scheduled update failed"
+		if result.Failed > 0 {
+			message = fmt.Sprintf("ToolTend scheduled update failed: %d task(s) failed", result.Failed)
+		}
+		interval := w.Config.Check.Interval
+		if interval <= 0 {
+			interval = 24 * time.Hour
+		}
+		slot := started.UnixNano() / interval.Nanoseconds()
+		result.FailureNotificationQueued, notificationErr = w.Database.QueueNotification(ctx, model.Notification{
+			CandidateHash: notificationHash("", strconv.FormatInt(slot, 10), errorCode),
+			Kind:          "reconcile_failed:" + errorCode,
+			Message:       message,
+			QueuedAt:      finished,
+		})
+	}
+	if runErr != nil {
+		return result, errors.Join(runErr, finishErr, notificationErr)
+	}
+	if finishErr != nil {
+		return result, fmt.Errorf("reconcile: finish run: %w", finishErr)
+	}
+	if notificationErr != nil {
+		return result, fmt.Errorf("reconcile: queue failure notification: %w", notificationErr)
+	}
+	return result, nil
+}
+
+func (w *Worker) runOnce(ctx context.Context, reason string) (RunResult, error) {
 	started := w.now()
 	result := RunResult{StartedAt: started}
 	finish := func() { result.FinishedAt = w.now() }
@@ -206,6 +276,17 @@ func (w *Worker) RunOnce(ctx context.Context, reason string) (RunResult, error) 
 		}
 		if inserted {
 			result.Scheduled++
+		} else {
+			var status model.TaskStatus
+			var code string
+			if err := w.Database.DB().QueryRowContext(ctx, `SELECT status,error_code FROM tasks WHERE id=?`, task.ID).Scan(&status, &code); err != nil {
+				finish()
+				return result, err
+			}
+			if status == model.TaskFailed {
+				result.Failed++
+				result.Failures = append(result.Failures, FailureResult{BindingID: binding.ID, TaskID: task.ID, Code: code})
+			}
 		}
 	}
 	if err := markHookSignalsProcessed(ctx, w.Database, signal, started); err != nil {
@@ -254,6 +335,16 @@ func (w *Worker) scheduleBundleTasks(ctx context.Context, signal int64, started 
 		}
 		if inserted {
 			result.Scheduled++
+		} else {
+			var status model.TaskStatus
+			var code string
+			if err := w.Database.DB().QueryRowContext(ctx, `SELECT status,error_code FROM bundle_tasks WHERE id=?`, task.ID).Scan(&status, &code); err != nil {
+				return err
+			}
+			if status == model.TaskFailed {
+				result.Failed++
+				result.Failures = append(result.Failures, FailureResult{BundleID: value.ID, TaskID: task.ID, Code: code})
+			}
 		}
 	}
 	return nil
@@ -279,19 +370,22 @@ func (w *Worker) runBundleTasks(ctx context.Context, result *RunResult) error {
 		}
 		value, err := w.Database.GetBundle(ctx, task.BundleID)
 		if err != nil {
-			_ = w.Database.FailBundleTask(ctx, task.ID, "bundle_unavailable")
-			result.Failed++
+			if err := w.failBundleTask(ctx, task, model.Bundle{ID: task.BundleID}, "bundle_unavailable", now, result); err != nil {
+				return err
+			}
 			continue
 		}
 		policy, err := w.Database.GetBundlePolicy(ctx, value.ID)
 		if err != nil || value.ConfigState != model.BundleConfigured {
-			_ = w.Database.FailBundleTask(ctx, task.ID, "bundle_policy_unavailable")
-			result.Failed++
+			if err := w.failBundleTask(ctx, task, value, "bundle_policy_unavailable", now, result); err != nil {
+				return err
+			}
 			continue
 		}
 		if w.BundleCoordinator == nil {
-			_ = w.Database.FailBundleTask(ctx, task.ID, "bundle_coordinator_unavailable")
-			result.Failed++
+			if err := w.failBundleTask(ctx, task, value, "bundle_coordinator_unavailable", now, result); err != nil {
+				return err
+			}
 			continue
 		}
 		activate := task.Kind == "update" && policy.Mode == model.BundlePolicyAuto
@@ -311,12 +405,34 @@ func (w *Worker) runBundleTasks(ctx context.Context, result *RunResult) error {
 			result.Retried++
 			continue
 		}
-		if err := w.Database.FailBundleTask(ctx, task.ID, code); err != nil {
+		if err := w.failBundleTask(ctx, task, value, code, now, result); err != nil {
 			return err
 		}
-		result.Failed++
 	}
 	return nil
+}
+
+func (w *Worker) failBundleTask(ctx context.Context, task model.BundleTask, value model.Bundle, code string, now time.Time, result *RunResult) error {
+	if err := w.Database.FailBundleTask(ctx, task.ID, code); err != nil {
+		return err
+	}
+	result.Failed++
+	result.Failures = append(result.Failures, FailureResult{BundleID: task.BundleID, TaskID: task.ID, Code: code})
+	if w.Config.Notify.Mode == model.NotifyNone {
+		return nil
+	}
+	name := strings.TrimSpace(value.Name)
+	if name == "" {
+		name = task.BundleID
+	}
+	kind := "bundle_failed:" + code
+	_, err := w.Database.QueueNotification(ctx, model.Notification{
+		CandidateHash: notificationHash("", task.ID, kind),
+		Kind:          kind,
+		Message:       fmt.Sprintf("Bundle %s update failed (%s)", name, code),
+		QueuedAt:      now,
+	})
+	return err
 }
 
 func (w *Worker) bundleIdempotencyKey(value model.Bundle, policy model.BundlePolicy, signal int64, now time.Time) string {

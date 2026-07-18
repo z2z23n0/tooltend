@@ -13,6 +13,7 @@ type Paths struct {
 	ConfigDir      string `json:"config_dir"`
 	ConfigFile     string `json:"config_file"`
 	StateDir       string `json:"state_dir"`
+	LogsDir        string `json:"logs_dir"`
 	DatabaseFile   string `json:"database_file"`
 	DataDir        string `json:"data_dir"`
 	ObjectsDir     string `json:"objects_dir"`
@@ -54,6 +55,7 @@ func pathsFor(configDir, stateDir, dataDir, shimDir string) Paths {
 		ConfigDir:      configDir,
 		ConfigFile:     filepath.Join(configDir, "config.toml"),
 		StateDir:       stateDir,
+		LogsDir:        filepath.Join(stateDir, "logs"),
 		DatabaseFile:   filepath.Join(stateDir, "state.db"),
 		DataDir:        dataDir,
 		ObjectsDir:     filepath.Join(dataDir, "objects"),
@@ -86,7 +88,10 @@ func cleanRoot(value, home string) string {
 
 // Ensure creates ToolTend-owned roots. Call it only after a confirmed write plan.
 func (p Paths) Ensure() error {
-	for _, dir := range []string{p.ConfigDir, p.StateDir, p.ObjectsDir, p.StagingDir, p.GenerationsDir, p.RuntimesDir} {
+	for _, dir := range []string{p.ConfigDir, p.StateDir, p.LogsDir, p.ObjectsDir, p.StagingDir, p.GenerationsDir, p.RuntimesDir} {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("config: create %s: %w", dir, err)
 		}

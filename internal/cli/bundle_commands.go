@@ -285,7 +285,9 @@ func (a *App) newBundlesUpdateCommand() *cobra.Command {
 				if prepareErr != nil {
 					return nil, prepareErr
 				}
-				previews = append(previews, preview)
+				if preview.UpdateAvailable {
+					previews = append(previews, preview)
+				}
 			}
 			var results []bundle.UpdateResult
 			value := plan.Plan{ID: "bundle-update-v1", Title: "Update complete ToolTend bundles"}

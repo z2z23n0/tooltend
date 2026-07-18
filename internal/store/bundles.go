@@ -428,6 +428,10 @@ func (s *Store) ConfigureBundle(ctx context.Context, value model.BundlePolicy) e
 		_, err = tx.ExecContext(ctx, `INSERT INTO bundle_policies(bundle_id,mode,recipe_trusted,updated_at) VALUES(?,?,?,?)
 			ON CONFLICT(bundle_id) DO UPDATE SET mode=excluded.mode,recipe_trusted=excluded.recipe_trusted,updated_at=excluded.updated_at`,
 			value.BundleID, value.Mode, boolInt(value.RecipeTrusted), timeText(value.UpdatedAt))
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE installations SET managed=? WHERE bundle_id=?`, boolInt(value.Mode == model.BundlePolicyAuto || value.Mode == model.BundlePolicyManual), value.BundleID)
 		return err
 	})
 }

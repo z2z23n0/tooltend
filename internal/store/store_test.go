@@ -163,7 +163,7 @@ func TestTaskAndNotificationDeduplication(t *testing.T) {
 		t.Fatal(err)
 	}
 	hash := strings.Repeat("c", 64)
-	queued, err := s.QueueNotification(ctx, model.Notification{CandidateHash: hash, Kind: "failure", QueuedAt: now})
+	queued, err := s.QueueNotification(ctx, model.Notification{CandidateHash: hash, Kind: "failure", Message: "更新失败", QueuedAt: now})
 	if err != nil || !queued {
 		t.Fatalf("queue: %v %v", queued, err)
 	}
@@ -178,12 +178,38 @@ func TestTaskAndNotificationDeduplication(t *testing.T) {
 	if len(notifications) != 1 {
 		t.Fatalf("notifications = %d", len(notifications))
 	}
+	if notifications[0].Message != "更新失败" {
+		t.Fatalf("notification message = %q", notifications[0].Message)
+	}
+	hasFailure, err := s.HasNotificationKindSince(ctx, "fail", now.Add(-time.Second))
+	if err != nil || !hasFailure {
+		t.Fatalf("has failure=%v err=%v", hasFailure, err)
+	}
 	notifications, err = s.TakeNotifications(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(notifications) != 0 {
 		t.Fatalf("notification shown twice")
+	}
+}
+
+func TestReconcileRunRecordsTerminalOutcome(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	started := time.Date(2026, 7, 18, 3, 0, 0, 0, time.UTC)
+	if err := s.BeginReconcileRun(ctx, model.ReconcileRun{ID: "run-1", Reason: "scheduled", Status: "running", StartedAt: started}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishReconcileRun(ctx, "run-1", "failed", "bundle_failed", `{"failed":1}`, started.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LatestReconcileRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "run-1" || got.Status != "failed" || got.ErrorCode != "bundle_failed" || got.FinishedAt == nil || got.SummaryJSON != `{"failed":1}` {
+		t.Fatalf("run = %#v", got)
 	}
 }
 

@@ -1,6 +1,6 @@
 schema = "bundle-recipe-v1"
 id = "anysearch"
-version = "1"
+version = "2"
 name = "AnySearch"
 owner = "delegated"
 confidence = "high"
@@ -9,7 +9,14 @@ key = "skill"
 name = "AnySearch Skill"
 kind = "skill"
 driver = "git-skill"
+source = "https://github.com/catoncat/anysearch-skill.git"
+subdir = "anysearch"
 required = true
+resolve_argv = ["tooltend", "__bundle-driver", "git-resolve", "https://github.com/catoncat/anysearch-skill.git"]
+stage_argv = ["tooltend", "__bundle-driver", "git-stage", "https://github.com/catoncat/anysearch-skill.git", "anysearch", "${version}", "${previous_version}", "${stage}", "${path}"]
+activate_argv = ["tooltend", "__bundle-driver", "git-activate", "${stage}", "${path}"]
+rollback_argv = ["tooltend", "__bundle-driver", "git-rollback", "https://github.com/catoncat/anysearch-skill.git", "anysearch", "${rollback_version}", "${stage}", "${path}"]
+health_argv = ["tooltend", "__bundle-driver", "skill-health", "${path}"]
 [[artifacts.selectors]]
 field = "name"
 equals = "anysearch"

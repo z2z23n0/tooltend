@@ -60,6 +60,30 @@ func TestRenderedSchedulesIncludeWorkerPATH(t *testing.T) {
 	}
 }
 
+func TestRenderedLaunchdSchedulesPersistLogsAndRunWatchdogLater(t *testing.T) {
+	options := Options{Executable: "/Users/example/.local/bin/tooltend", StateDir: "/Users/example/.local/state/tooltend", Hour: 23, Minute: 40}
+	reconcile := renderLaunchd(options)
+	watchdog := renderLaunchdWatchdog(options)
+	for _, value := range []string{"reconcile.stdout.log", "reconcile.stderr.log"} {
+		if !strings.Contains(reconcile, value) {
+			t.Fatalf("reconcile schedule missing %s: %s", value, reconcile)
+		}
+	}
+	if !strings.Contains(watchdog, "<string>watchdog</string>") || !strings.Contains(watchdog, "watchdog.stderr.log") ||
+		!strings.Contains(watchdog, "<key>Hour</key><integer>0</integer>") || !strings.Contains(watchdog, "<key>Minute</key><integer>40</integer>") {
+		t.Fatalf("invalid watchdog schedule: %s", watchdog)
+	}
+}
+
+func TestSystemdWatchdogWaitsPastReconcileJitter(t *testing.T) {
+	options := Options{Executable: "/usr/local/bin/tooltend", StateDir: "/var/lib/tooltend", Hour: 23, Minute: 40}
+	service := renderSystemdWatchdogService(options)
+	timer := renderSystemdWatchdogTimer(options)
+	if !strings.Contains(service, "watchdog --max-age 3h") || !strings.Contains(timer, "OnCalendar=*-*-* 01:40:00") {
+		t.Fatalf("service=%s\ntimer=%s", service, timer)
+	}
+}
+
 type recordingRunner struct {
 	calls []string
 	fail  string
@@ -76,16 +100,16 @@ func (r *recordingRunner) Run(_ context.Context, name string, args ...string) (e
 
 func TestActivateRegistersOneShotSchedule(t *testing.T) {
 	runner := &recordingRunner{}
-	launchd := Plan{Platform: "launchd", Files: []File{{Path: "/tmp/io.tooltend.reconcile.plist"}}}
+	launchd := Plan{Platform: "launchd", Files: []File{{Path: "/tmp/io.tooltend.reconcile.plist"}, {Path: "/tmp/io.tooltend.watchdog.plist"}}}
 	if err := Activate(context.Background(), launchd, runner); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 || !strings.Contains(runner.calls[0], "bootout") || !strings.Contains(runner.calls[1], "bootstrap") {
+	if len(runner.calls) != 4 || !strings.Contains(runner.calls[0], "bootout") || !strings.Contains(runner.calls[1], "bootstrap") || !strings.Contains(runner.calls[3], "watchdog") {
 		t.Fatalf("launchd calls = %#v", runner.calls)
 	}
 
 	runner.calls = nil
-	systemd := Plan{Platform: "systemd", Files: []File{{Path: "/tmp/tooltend-reconcile.service"}, {Path: "/tmp/tooltend-reconcile.timer"}}}
+	systemd := Plan{Platform: "systemd", Files: []File{{Path: "/tmp/tooltend-reconcile.service"}, {Path: "/tmp/tooltend-reconcile.timer"}, {Path: "/tmp/tooltend-watchdog.service"}, {Path: "/tmp/tooltend-watchdog.timer"}}}
 	if err := Activate(context.Background(), systemd, runner); err != nil {
 		t.Fatal(err)
 	}
@@ -97,5 +121,8 @@ func TestActivateRegistersOneShotSchedule(t *testing.T) {
 func TestActivateFailsClosedForMalformedPlan(t *testing.T) {
 	if err := Activate(context.Background(), Plan{Platform: "launchd"}, &recordingRunner{}); err == nil {
 		t.Fatal("expected malformed launchd plan to be rejected")
+	}
+	if err := Activate(context.Background(), Plan{Platform: "launchd", Files: []File{{Path: "/tmp/io.tooltend.reconcile.plist"}}}, &recordingRunner{}); err == nil {
+		t.Fatal("expected launchd plan without watchdog to be rejected")
 	}
 }
