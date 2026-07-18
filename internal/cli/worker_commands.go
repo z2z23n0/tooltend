@@ -198,15 +198,15 @@ func (a *App) newWatchdogCommand() *cobra.Command {
 		if a.global.DryRun {
 			return map[string]any{"dry_run": true, "max_age": maxAge.String(), "state_dir": paths.StateDir}, nil
 		}
-		desktop := notify.Desktop{Runner: a.runner}
+		desktop := a.desktopNotifier()
 		cfg, err := config.Load(paths.ConfigFile)
 		if err != nil {
-			_ = desktop.Send(ctx, "ToolTend", "Scheduled update state cannot be checked. Run `tooltend doctor` for details.")
+			a.sendDesktopNotification(ctx, "Scheduled update state cannot be checked. Run `tooltend doctor` for details.")
 			return nil, err
 		}
 		database, err := store.OpenRW(paths.DatabaseFile)
 		if err != nil {
-			_ = desktop.Send(ctx, "ToolTend", "Scheduled update state cannot be opened. Run `tooltend doctor` for details.")
+			a.sendDesktopNotification(ctx, "Scheduled update state cannot be opened. Run `tooltend doctor` for details.")
 			return nil, err
 		}
 		defer database.Close()
@@ -235,8 +235,20 @@ func (a *App) notifyScheduledOutcome(ctx context.Context, paths config.Paths, va
 		message = fmt.Sprintf("Scheduled update completed: %d task(s) succeeded.", result.Succeeded)
 	}
 	if message != "" {
-		_ = (notify.Desktop{Runner: a.runner}).Send(ctx, "ToolTend", message)
+		a.sendDesktopNotification(ctx, message)
 	}
+}
+
+func (a *App) desktopNotifier() notify.Desktop {
+	return notify.Desktop{AppPath: notify.DarwinNotifierExecutable(a.home), Runner: a.runner}
+}
+
+func (a *App) sendDesktopNotification(ctx context.Context, message string) bool {
+	if err := a.desktopNotifier().Send(ctx, "ToolTend", message); err != nil {
+		_, _ = fmt.Fprintf(a.errOut, "Warning: desktop notification failed: %v\n", err)
+		return false
+	}
+	return true
 }
 
 func (a *App) reconcileOnce(ctx context.Context, paths config.Paths, reason string) (any, error) {

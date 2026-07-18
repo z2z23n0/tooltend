@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 
 	v1 "github.com/z2z23n0/tooltend/internal/api/v1"
 	"github.com/z2z23n0/tooltend/internal/config"
 	"github.com/z2z23n0/tooltend/internal/host"
+	"github.com/z2z23n0/tooltend/internal/notify"
 	"github.com/z2z23n0/tooltend/internal/scheduler"
 )
 
@@ -45,6 +47,11 @@ func (a *App) repairAfterSelfUpdate(ctx context.Context, paths config.Paths) []v
 	}
 	if err != nil {
 		warnings = append(warnings, v1.Warning{Code: "self_update_scheduler_repair_failed", Message: fmt.Sprintf("self-update applied, but the ToolTend scheduler needs repair: %s", err)})
+	}
+	if runtime.GOOS == "darwin" {
+		if _, err := notify.InstallDarwin(ctx, a.home, a.runner); err != nil {
+			warnings = append(warnings, v1.Warning{Code: "self_update_notifier_repair_failed", Message: fmt.Sprintf("self-update applied, but ToolTend Notifier needs repair: %s", err)})
+		}
 	}
 	return warnings
 }

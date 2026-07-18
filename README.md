@@ -93,6 +93,7 @@ SessionStart / ToolUse / 每日任务 / 用户命令
 - `kick` 只启动一个脱离当前会话的一次性 worker。全局文件锁保证并发 Session 不会并行更新。
 - macOS 使用 launchd，Linux 使用 systemd user timer；两者每天启动一次 `reconcile --once`，没有常驻 ToolTend 进程。
 - 每轮 reconcile 都会持久化完整运行状态；主任务之后由独立 watchdog 检查漏跑、失败或未完成状态。失败默认发送桌面通知，并在下次 Codex/Claude SessionStart 时补充提醒。
+- macOS 安装器会用 Xcode Command Line Tools 构建并把 `ToolTend Notifier.app` 注册到 `~/Applications`，首次发送时需要在系统提示中允许通知；不再借用 Script Editor 的通知身份，`tooltend doctor` 也会检查安装与授权状态。
 - macOS 调度输出保存在 `~/.local/state/tooltend/logs/`，不会再丢弃到 `/dev/null`；`tooltend status` 和 `tooltend doctor` 会显示最近一次完整 reconcile 的结果。
 - 未执行 `bundles configure` 的 Bundle 不检查更新、不下载，也不调用安装器。
 - Bundle 更新先完成所有 Artifact 的解析、校验和 staging，再按物理 Installation 激活；失败时按相反顺序补偿。

@@ -22,6 +22,7 @@ import (
 	"github.com/z2z23n0/tooltend/internal/inventory"
 	"github.com/z2z23n0/tooltend/internal/lockfile"
 	"github.com/z2z23n0/tooltend/internal/model"
+	"github.com/z2z23n0/tooltend/internal/notify"
 	"github.com/z2z23n0/tooltend/internal/reconcile"
 	"github.com/z2z23n0/tooltend/internal/store"
 )
@@ -357,7 +358,7 @@ func TestScheduledFailureSendsDesktopNotification(t *testing.T) {
 	a.notifyScheduledOutcome(context.Background(), paths, reconcile.RunResult{Failed: 2, FailureNotificationQueued: true}, nil)
 	wantName := "notify-send"
 	if runtime.GOOS == "darwin" {
-		wantName = "/usr/bin/osascript"
+		wantName = notify.DarwinNotifierExecutable(home)
 	}
 	if runner.name != wantName || !strings.Contains(strings.Join(runner.args, " "), "2 task(s) failed") {
 		t.Fatalf("notification call = %s %#v", runner.name, runner.args)

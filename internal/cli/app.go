@@ -143,6 +143,7 @@ func New(options Options) *cobra.Command {
 		a.newWatchdogCommand(),
 		a.newVersionCommand(),
 		a.newBundleDriverCommand(),
+		a.newNotifierCommand(),
 	)
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return a.writeFailure(commandName(cmd), cliError("invalid_argument", err.Error(), err))

@@ -2,7 +2,8 @@ package notify
 
 import (
 	"context"
-	"strings"
+	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/z2z23n0/tooltend/internal/execx"
@@ -18,16 +19,24 @@ func (r *recordingRunner) Run(_ context.Context, name string, args ...string) (e
 	return execx.Result{}, nil
 }
 
-func TestDarwinNotificationEscapesAppleScript(t *testing.T) {
+func TestDarwinNotificationUsesStableAppIdentity(t *testing.T) {
 	runner := &recordingRunner{}
-	err := (Desktop{GOOS: "darwin", Runner: runner}).Send(context.Background(), `Tool"Tend`, "line 1\nline 2")
+	appPath := filepath.Join(t.TempDir(), "ToolTend Notifier")
+	err := (Desktop{GOOS: "darwin", AppPath: appPath, Runner: runner}).Send(context.Background(), `Tool"Tend`, "line 1\nline 2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runner.name != "/usr/bin/osascript" || len(runner.args) != 2 || runner.args[0] != "-e" {
+	if runner.name != appPath || len(runner.args) != 2 {
 		t.Fatalf("call = %s %#v", runner.name, runner.args)
 	}
-	if strings.Contains(runner.args[1], "\n") || !strings.Contains(runner.args[1], `Tool\"Tend`) {
-		t.Fatalf("unsafe script = %q", runner.args[1])
+	if runner.args[0] != `Tool"Tend` || runner.args[1] != "line 1\nline 2" {
+		t.Fatalf("notification arguments = %#v", runner.args)
+	}
+}
+
+func TestDarwinNotificationRequiresInstalledNotifier(t *testing.T) {
+	err := (Desktop{GOOS: "darwin", Runner: &recordingRunner{}}).Send(context.Background(), "ToolTend", "message")
+	if !errors.Is(err, ErrNotifierUnavailable) {
+		t.Fatalf("error = %v", err)
 	}
 }

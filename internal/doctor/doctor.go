@@ -22,6 +22,7 @@ import (
 	"github.com/z2z23n0/tooltend/internal/lifecycle"
 	"github.com/z2z23n0/tooltend/internal/lockfile"
 	"github.com/z2z23n0/tooltend/internal/model"
+	"github.com/z2z23n0/tooltend/internal/notify"
 	"github.com/z2z23n0/tooltend/internal/plan"
 	"github.com/z2z23n0/tooltend/internal/scheduler"
 	"github.com/z2z23n0/tooltend/internal/store"
@@ -165,6 +166,20 @@ func RunWithOptions(ctx context.Context, options Options) Report {
 	}
 	if options.Home == "" || options.Executable == "" {
 		return report
+	}
+	if runtime.GOOS == "darwin" && options.Config.Notify.Mode != model.NotifyNone {
+		check := Check{Name: "desktop_notifier"}
+		if err := notify.CheckDarwin(options.Home); err != nil {
+			check.Level = LevelWarning
+			check.Message = "macOS desktop notifier is unavailable; rerun the ToolTend installer"
+		} else if err := notify.CheckDarwinAuthorization(ctx, options.Home, options.Runner); err != nil {
+			check.Level = LevelWarning
+			check.Message = "macOS desktop notification permission is not allowed; enable ToolTend Notifier in System Settings"
+		} else {
+			check.Level = LevelOK
+			check.Message = "macOS desktop notifier is installed and authorized"
+		}
+		report.Checks = append(report.Checks, check)
 	}
 	agents := options.Agents
 	if len(agents) == 0 {
