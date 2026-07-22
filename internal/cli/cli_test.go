@@ -149,7 +149,7 @@ func TestResetStateRestoresOldStateWhenSchedulerReactivationFails(t *testing.T) 
 	}
 	configHash := fileHashOrEmpty(paths.ConfigFile)
 	databaseHash := fileHashOrEmpty(paths.DatabaseFile)
-	runner.failAt = runner.calls + 4 // two deactivations and best-effort bootout succeed; final registration fails once
+	runner.failNextSchedulerActivation = true
 	out.Reset()
 	command = New(options)
 	command.SetArgs([]string{"init", "--reset-state", "--yes", "--json"})
@@ -320,8 +320,8 @@ func TestComponentsListSeparatesActionableManagedAndCompleteInventory(t *testing
 }
 
 type successfulRunner struct {
-	calls  int
-	failAt int
+	calls                       int
+	failNextSchedulerActivation bool
 }
 
 type notificationRunner struct {
@@ -365,12 +365,48 @@ func TestScheduledFailureSendsDesktopNotification(t *testing.T) {
 	}
 }
 
-func (r *successfulRunner) Run(context.Context, string, ...string) (execx.Result, error) {
+func (r *successfulRunner) Run(_ context.Context, name string, args ...string) (execx.Result, error) {
 	r.calls++
-	if r.failAt > 0 && r.calls == r.failAt {
+	if r.failNextSchedulerActivation && isSchedulerActivationCommand(name, args) {
+		r.failNextSchedulerActivation = false
 		return execx.Result{}, errors.New("injected runner failure")
 	}
 	return execx.Result{}, nil
+}
+
+func isSchedulerActivationCommand(name string, args []string) bool {
+	if name == "launchctl" {
+		return len(args) > 0 && args[0] == "bootstrap"
+	}
+	if name == "systemctl" {
+		for _, arg := range args {
+			if arg == "enable" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestSchedulerActivationCommandDetection(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		want    bool
+	}{
+		{name: "launchd activate", command: "launchctl", args: []string{"bootstrap", "gui/501", "/tmp/tooltend.plist"}, want: true},
+		{name: "launchd deactivate", command: "launchctl", args: []string{"bootout", "gui/501", "/tmp/tooltend.plist"}},
+		{name: "systemd activate", command: "systemctl", args: []string{"--user", "enable", "--now", "tooltend-reconcile.timer"}, want: true},
+		{name: "systemd reload", command: "systemctl", args: []string{"--user", "daemon-reload"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isSchedulerActivationCommand(test.command, test.args); got != test.want {
+				t.Fatalf("isSchedulerActivationCommand(%q, %q) = %v, want %v", test.command, test.args, got, test.want)
+			}
+		})
+	}
 }
 
 func TestConfirmedInitAppliesCompletePlannedState(t *testing.T) {
