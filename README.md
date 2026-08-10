@@ -1,139 +1,141 @@
 # ToolTend
 
+English | [简体中文](README.zh-CN.md)
+
 **Bundle lifecycle manager for coding-agent tooling.**
 
 *Keep your coding-agent tooling current.*
 
-ToolTend 是面向 Codex 和 Claude Code 的本地生命周期管理器。它把同一个工具产品的 CLI、Skill、Hook、App、配置和内嵌二进制聚合成一个 Bundle，用同一次 Release、同一个策略和同一笔事务管理；同一份物理安装被多个 Agent 使用时只更新一次。
+ToolTend is a local lifecycle manager for Codex and Claude Code. It groups the CLI, Skill, Hook, App, configuration, and embedded binaries of the same tool product into a Bundle, then manages them with one Release, one policy, and one transaction. When multiple agents share the same physical installation, ToolTend updates it only once.
 
-ToolTend v0.2 不提供扩展市场、在线 recipe、搜索或卸载，也不会在初始化时自动接管任何已有工具。Component/Binding 仍保留为底层发现证据和兼容接口，但不再是自动更新的调度单位。
+ToolTend v0.2 does not provide an extension marketplace, online recipes, search, or uninstall support. It also never takes over existing tools automatically during initialization. Component and Binding remain available as low-level discovery evidence and compatibility interfaces, but they are no longer scheduling units for automatic updates.
 
-## 安装
+## Installation
 
-正式版本可以直接从 GitHub Release 安装到 `~/.local/bin`。安装器通过 GitHub HTTPS 获取匹配平台资产，并按 release manifest 校验字节数和 SHA-256：
+Install an official build from GitHub Releases into `~/.local/bin`. The installer downloads the matching platform asset over GitHub HTTPS and verifies its byte size and SHA-256 against the release manifest:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/z2z23n0/tooltend/main/install.sh | bash
 ```
 
-从源码安装需要 Go 1.22 或更新版本：
+Installing from source requires Go 1.22 or later:
 
 ```bash
 ./scripts/install.sh
 ```
 
-也可以安装 Go module 开发构建；开发构建不含 release 公钥，不能使用签名自更新：
+You can also install a development build from the Go module. Development builds do not include the release public key and cannot perform signed self-updates:
 
 ```bash
 go install github.com/z2z23n0/tooltend/cmd/tooltend@latest
 ```
 
-确认 `$(go env GOPATH)/bin` 或 `~/.local/bin` 已在 `PATH` 中，然后运行：
+Make sure `$(go env GOPATH)/bin` or `~/.local/bin` is in your `PATH`, then run:
 
 ```bash
 tooltend version
 tooltend init
 ```
 
-`tooltend init` 在最终确认前只读取本机状态。确认后会安装 ToolTend 自己的 Hook、shim 和 scheduler，扫描并聚合 Bundle，但不会迁移 runtime、执行外部安装器或排队接管任务。所有发现的 Bundle 初始状态都是 `unconfigured`。
+`tooltend init` only reads local state until the final confirmation. After confirmation, it installs ToolTend's own Hook, shim, and scheduler, then scans and groups Bundles. It does not migrate runtimes, run external installers, or queue takeover tasks. Every discovered Bundle starts in the `unconfigured` state.
 
-已有 ToolTend 状态需要完全重建时，先预览再确认：
+To rebuild an existing ToolTend state completely, preview the reset before confirming it:
 
 ```bash
 tooltend init --reset-state --dry-run
 tooltend init --reset-state --yes
 ```
 
-重置前会获取全局锁、检查 managed 对象和未完成 journal，并把 config、state、database、data 与基础设施状态备份到相邻的 `tooltend-backups/<timestamp>/`。任一步失败会恢复旧状态和 scheduler。
+Before resetting, ToolTend acquires the global lock, checks managed objects and unfinished journals, and backs up configuration, state, database, data, and infrastructure state to a neighboring `tooltend-backups/<timestamp>/` directory. If any step fails, it restores the previous state and scheduler.
 
-## Bundle 模型
+## Bundle model
 
 ```text
 Bundle
-  ├─ BundleRelease：一次整体、精确解析的版本
-  ├─ BundleArtifact：CLI / Skill / Hook / App / Config / Binary
-  ├─ Installation：唯一物理安装实例
-  ├─ ConsumerBinding：Codex / Claude / 项目如何消费该实例
+  ├─ BundleRelease: one exact, fully resolved release
+  ├─ BundleArtifact: CLI / Skill / Hook / App / Config / Binary
+  ├─ Installation: one unique physical installation
+  ├─ ConsumerBinding: how Codex / Claude / a project consumes it
   └─ Policy / Transaction / Receipt / Health Check
 ```
 
-生命周期所有者固定为：
+Each Bundle has a fixed lifecycle owner:
 
-| 所有者 | 行为 |
+| Owner | Behavior |
 |---|---|
-| `tooltend` | ToolTend staging、切换、验证和回滚 |
-| `delegated` | 编排 npm、mtskills 或官方安装器，并验证、记录结果 |
-| `host-owned` | Codex/Claude 管理；ToolTend 只观察 |
-| `app-owned` | App 自带更新器管理；ToolTend 只观察 |
-| `workspace-linked` | 链接本地仓库；默认只观察 commit 和健康 |
-| `unresolved` | 无法高置信识别；禁止自动更新 |
+| `tooltend` | ToolTend performs staging, activation, verification, and rollback |
+| `delegated` | Orchestrates npm, mtskills, or an official installer, then verifies and records the result |
+| `host-owned` | Managed by Codex/Claude; ToolTend only observes |
+| `app-owned` | Managed by the App's own updater; ToolTend only observes |
+| `workspace-linked` | Linked to a local repository; observes its commit and health by default |
+| `unresolved` | Cannot be identified with high confidence; automatic updates are prohibited |
 
-内置 `bundle-recipe-v1` recipe 随二进制发布。本地扩展放在 `~/.config/tooltend/bundles.d/*.toml`，首次配置必须显式信任。所有命令只能声明静态 argv，不能使用 shell 字符串。
+Built-in `bundle-recipe-v1` recipes ship with the binary. Put local extensions in `~/.config/tooltend/bundles.d/*.toml`; the first configuration requires explicit trust. Commands may declare only static argv and cannot use shell strings.
 
-## 工作方式
+## How it works
 
-ToolTend 不运行常驻 daemon：
+ToolTend does not run an always-on daemon:
 
 ```text
-SessionStart / ToolUse / 每日任务 / 用户命令
+SessionStart / ToolUse / daily task / user command
                     │
                     ▼
           tooltend hook / kick
-       脱敏记录事件并立即返回
+       record a redacted event and return immediately
                     │
                     ▼
        tooltend reconcile --once
-  排他锁 → 恢复 → 扫描/聚合 → Bundle 事务 → 退出
+  exclusive lock → recovery → scan/group → Bundle transaction → exit
                     │
                     ▼
-       Bundle Receipt 与健康状态
+       Bundle Receipt and health status
 ```
 
-- Hook 热路径不联网、不合并、不调用模型，SQLite 使用 `busy_timeout=0`；数据库繁忙或输入异常时 fail-open。
-- `kick` 只启动一个脱离当前会话的一次性 worker。全局文件锁保证并发 Session 不会并行更新。
-- macOS 使用 launchd，Linux 使用 systemd user timer；两者每天启动一次 `reconcile --once`，没有常驻 ToolTend 进程。
-- 每轮 reconcile 都会持久化完整运行状态；主任务之后由独立 watchdog 检查漏跑、失败或未完成状态。失败默认发送桌面通知，并在下次 Codex/Claude SessionStart 时补充提醒。
-- macOS 安装器会用 Xcode Command Line Tools 构建并把 `ToolTend Notifier.app` 注册到 `~/Applications`，首次发送时需要在系统提示中允许通知；不再借用 Script Editor 的通知身份，`tooltend doctor` 也会检查安装与授权状态。
-- macOS 调度输出保存在 `~/.local/state/tooltend/logs/`，不会再丢弃到 `/dev/null`；`tooltend status` 和 `tooltend doctor` 会显示最近一次完整 reconcile 的结果。
-- 未执行 `bundles configure` 的 Bundle 不检查更新、不下载，也不调用安装器。
-- Bundle 更新先完成所有 Artifact 的解析、校验和 staging，再按物理 Installation 激活；失败时按相反顺序补偿。
-- Bundle 事务使用步骤 journal。中断、失败、回滚和健康检查都有 Bundle 级 Receipt 可审计。
+- The Hook hot path does not access the network, aggregate state, or call a model, and SQLite uses `busy_timeout=0`. It fails open if the database is busy or the input is invalid.
+- `kick` starts a single detached, one-shot worker. A global file lock prevents concurrent sessions from updating in parallel.
+- macOS uses launchd, while Linux uses a systemd user timer. Each starts `reconcile --once` once per day; neither runs a persistent ToolTend process.
+- Every reconcile persists its full run state. After the main task, an independent watchdog checks for missed, failed, or unfinished runs. Failures trigger desktop notifications by default and a follow-up reminder at the next Codex/Claude SessionStart.
+- On macOS, the installer uses Xcode Command Line Tools to build and register `ToolTend Notifier.app` in `~/Applications`. You must allow notifications at the first system prompt. ToolTend no longer borrows Script Editor's notification identity, and `tooltend doctor` checks installation and authorization state.
+- macOS scheduler output is stored in `~/.local/state/tooltend/logs/` instead of being discarded to `/dev/null`. `tooltend status` and `tooltend doctor` show the most recent complete reconcile result.
+- Bundles that have not been configured with `bundles configure` do not check for updates, download files, or invoke installers.
+- A Bundle update resolves, verifies, and stages every Artifact before activating each physical Installation. Failures are compensated in reverse order.
+- Bundle transactions use a step journal. Interruptions, failures, rollbacks, and health checks all produce auditable Bundle-level Receipts.
 
-## 策略
+## Policies
 
-每个 Bundle 有一个明确策略：
+Every Bundle has one explicit policy:
 
 ```toml
 mode = "auto" # auto | manual | observe | ignore
 ```
 
-- `auto`：仅允许 recipe 同时具备精确解析、完整 staging、激活、健康检查和可靠补偿回滚。
-- `manual`：允许检查更新，但每次整包应用都需要用户确认。
-- `observe`：只记录版本、来源、漂移和健康，不执行替换命令。
-- `ignore`：保留发现证据，不检查更新。
+- `auto`: allowed only when the recipe provides exact resolution, complete staging, activation, health checks, and reliable compensating rollback.
+- `manual`: allows update checks, but applying the full Bundle requires confirmation every time.
+- `observe`: records only versions, sources, drift, and health; never runs replacement commands.
+- `ignore`: preserves discovery evidence but does not check for updates.
 
-`host-owned`、`app-owned`、`workspace-linked` 和 `unresolved` 只能选择 `observe` 或 `ignore`。交互配置中回车表示跳过，未选择的 Bundle 始终保持 `unconfigured`。
+`host-owned`, `app-owned`, `workspace-linked`, and `unresolved` Bundles can use only `observe` or `ignore`. Pressing Enter in interactive configuration skips the Bundle, and unselected Bundles always remain `unconfigured`.
 
-## 更新与回滚
+## Updates and rollback
 
-每次 Bundle 更新严格依次经过：
+Every Bundle update follows this exact sequence:
 
 ```text
-解析整体 BundleRelease 和精确 Artifact 版本
-→ 全部下载、完整性校验和 staging
-→ 兼容性、权限、Hook 和本地修改检查
-→ 每个物理 Installation 只更新一次
-→ 派生步骤和 Bundle/Artifact 健康检查
-→ 提交 Receipt；失败则反向补偿
+Resolve the complete BundleRelease and exact Artifact versions
+→ download everything, verify integrity, and stage
+→ check compatibility, permissions, Hooks, and local modifications
+→ update each physical Installation exactly once
+→ run derived steps and Bundle/Artifact health checks
+→ commit the Receipt; compensate in reverse order on failure
 ```
 
-delegated driver 复用用户现有认证环境，但不会保存或输出 registry token、环境变量或完整命令。默认 resolve 超时 30 秒、安装 5 分钟、健康检查 30 秒，最多重试 3 次。
+Delegated drivers reuse the user's existing authentication environment but never save or print registry tokens, environment variables, or full commands. Default timeouts are 30 seconds for resolution, 5 minutes for installation, and 30 seconds for health checks, with up to 3 retries.
 
-## 发现证据
+## Discovery evidence
 
-发现优先读取 npm `package.json`、Git commit、GitHub Release、本机 `.agents/.skill-lock.json`、mtskills 来源记录和签名 manifest、App `Info.plist`/代码签名/Sparkle，以及仓库链接。Skill 文档里的 `latest`、示例命令和依赖约束只作为需求证据，绝不会当作已安装版本。
+Discovery prioritizes npm `package.json`, Git commits, GitHub Releases, local `.agents/.skill-lock.json`, mtskills source records and signed manifests, App `Info.plist`/code signatures/Sparkle, and repository links. `latest`, example commands, and dependency constraints in Skill documentation are requirement evidence only and are never treated as installed versions.
 
-Codex 插件缓存由 Host 管理，ToolTend 聚合为 `host-owned` 观察对象，不参与下载或替换。无法高置信聚合的对象以 fallback Bundle 保留，`bundles list --all` 才展示。
+Codex plugin caches are managed by the Host. ToolTend groups them as `host-owned` observed objects and does not download or replace them. Objects that cannot be grouped with high confidence remain as fallback Bundles and appear only in `bundles list --all`.
 
 ## CLI
 
@@ -162,11 +164,11 @@ tooltend self status|update
 tooltend doctor [--repair]
 ```
 
-所有命令支持 `--json`；写操作支持 `--dry-run`。在非交互或 JSON 模式中，未提供 `--yes` 的写操作返回 `confirmation_required` 和完整预览，不会提示或偷偷写入。
+All commands support `--json`, and write operations support `--dry-run`. In non-interactive or JSON mode, a write operation without `--yes` returns `confirmation_required` with a complete preview instead of prompting or writing silently.
 
-`components`、`policy`、`adopt`、单组件 `update/rollback/history/review` 是 v0.1 兼容入口，会输出弃用提示。它们不再决定用户看到的 Bundle 数量或 Bundle 更新状态。
+The `components`, `policy`, and `adopt` commands, along with single-component `update`, `rollback`, `history`, and `review`, are v0.1 compatibility entry points and emit deprecation warnings. They no longer determine the number of Bundles shown to users or Bundle update state.
 
-JSON 输出使用稳定的 V1 envelope：
+JSON output uses a stable V1 envelope:
 
 ```json
 {
@@ -178,9 +180,9 @@ JSON 输出使用稳定的 V1 envelope：
 }
 ```
 
-Agent 提交 review 时必须同时给出 candidate ID、candidate hash、`safe|conflict|uncertain` verdict、风险类型和摘要；旧候选或 hash 不匹配的判断无效。
+When an agent submits a review, it must include the candidate ID, candidate hash, a `safe|conflict|uncertain` verdict, risk type, and summary. Judgments for stale candidates or mismatched hashes are invalid.
 
-## 项目复现
+## Project reproduction
 
 ```bash
 tooltend project init
@@ -189,41 +191,41 @@ tooltend project sync --dry-run
 tooltend project sync --yes
 ```
 
-- `tooltend.toml` 声明来源、组件类型、目标 Agent 和版本通道。
-- `tooltend.lock` 保存 resolved version/commit 与完整性哈希；`project sync` 将其作为 exact 目标和制品哈希约束，并以事务 CAS 应用已确认的预览。
-- 两个文件都可以提交到项目仓库；secret、token、来源信任和本机 apply mode 不会写入其中。
+- `tooltend.toml` declares sources, component types, target agents, and version channels.
+- `tooltend.lock` stores resolved versions/commits and integrity hashes. `project sync` uses them as exact target and artifact-hash constraints, then applies the confirmed preview with transactional compare-and-swap.
+- Both files can be committed to a project repository. Secrets, tokens, source trust, and local apply modes are never written to them.
 
-## 本地数据
+## Local data
 
-默认遵循 XDG 目录；设置 `TOOLTEND_HOME` 可将全部 ToolTend 数据放到一个独立根目录。
+ToolTend follows XDG directories by default. Set `TOOLTEND_HOME` to place all ToolTend data under one independent root directory.
 
-| 内容 | 默认位置 |
+| Content | Default location |
 |---|---|
-| 配置 | `${XDG_CONFIG_HOME:-~/.config}/tooltend/config.toml` |
-| SQLite schema v5 状态 | `${XDG_STATE_HOME:-~/.local/state}/tooltend/state.db` |
-| activation lock | `${XDG_STATE_HOME:-~/.local/state}/tooltend/activation.lock` |
-| objects / staging / generations | `${XDG_DATA_HOME:-~/.local/share}/tooltend/` |
-| stable shims | `~/.local/bin/` |
-| 本地 Bundle recipe | `${XDG_CONFIG_HOME:-~/.config}/tooltend/bundles.d/*.toml` |
-| reset 备份 | config/state/data 相邻的 `tooltend-backups/<timestamp>/` |
+| Configuration | `${XDG_CONFIG_HOME:-~/.config}/tooltend/config.toml` |
+| SQLite schema v5 state | `${XDG_STATE_HOME:-~/.local/state}/tooltend/state.db` |
+| Activation lock | `${XDG_STATE_HOME:-~/.local/state}/tooltend/activation.lock` |
+| Objects / staging / generations | `${XDG_DATA_HOME:-~/.local/share}/tooltend/` |
+| Stable shims | `~/.local/bin/` |
+| Local Bundle recipes | `${XDG_CONFIG_HOME:-~/.config}/tooltend/bundles.d/*.toml` |
+| Reset backups | `tooltend-backups/<timestamp>/` next to configuration/state/data |
 
-SQLite 使用 WAL，schema migration 前创建备份。数据库不保存完整 Prompt、transcript、未经解析的原始命令、环境变量、MCP secret 或 registry token；Hook 只记录标准化 package/version、事件类型和不可逆 correlation hash。
+SQLite uses WAL and creates a backup before schema migration. The database never stores full prompts, transcripts, unparsed raw commands, environment variables, MCP secrets, or registry tokens. Hooks record only normalized package/version values, event types, and irreversible correlation hashes.
 
-## ToolTend 自更新
+## ToolTend self-update
 
-正式 release 包含 darwin/linux 的 arm64/amd64 原始可执行文件、`checksums.txt` 和 Ed25519 签名 manifest。安装后的自更新使用二进制内嵌公钥验证签名，并同时检查 release sequence、平台、SHA-256 和字节数。任一不匹配都不会进入 staging；开发构建拒绝自更新。
+Official releases include raw arm64/amd64 executables for Darwin and Linux, `checksums.txt`, and an Ed25519-signed manifest. The installed self-updater verifies the signature with an embedded public key and also checks the release sequence, platform, SHA-256, and byte size. Any mismatch prevents staging; development builds refuse to self-update.
 
-通过 Homebrew 安装的版本只提示执行对应的 `brew upgrade tooltend`，不会绕过 Homebrew 替换自身。
+Homebrew installations only prompt you to run the corresponding `brew upgrade tooltend` and never bypass Homebrew to replace themselves.
 
-## 开发
+## Development
 
-本地与 GitHub Actions 共用同一验证入口：
+Local development and GitHub Actions use the same validation entry point:
 
 ```bash
 ./scripts/ci.sh
 ```
 
-脚本检查 `gofmt`、module 一致性，执行 `go vet ./...`、`go test ./...` 和 `go build ./...`。CI 在 macOS 与 Linux 上运行，以覆盖文件锁、generation 指针和系统调度差异。
+The script checks `gofmt` and module consistency, then runs `go vet ./...`, `go test ./...`, and `go build ./...`. CI runs on both macOS and Linux to cover differences in file locking, generation pointers, and system scheduling.
 
 ## License
 
